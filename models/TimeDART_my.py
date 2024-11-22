@@ -6,6 +6,7 @@ from layers.Transformer_EncDec import Decoder, DecoderLayer, Encoder, EncoderLay
 from layers.SelfAttention_Family import DSAttention, AttentionLayer
 from layers.Embed import DataEmbedding
 from utils.losses import AutomaticWeightedLoss
+from utils.masking import generate_causal_mask
 from utils.tools import ContrastiveWeight, AggregationRebuild
 
 class Flatten_Head(nn.Module):
@@ -40,6 +41,76 @@ class Pooler_Head(nn.Module):
         x = self.pooler(x) # [(bs * n_vars) x dimension]  # 224 96 32 -- 224 128
         return x
 
+
+
+
+class TransformerEncoderBlock(nn.Module):
+    def __init__(
+        self, d_model: int, num_heads: int, feedforward_dim: int, dropout: float
+    ):
+        super(TransformerEncoderBlock, self).__init__()
+
+        self.attention = nn.MultiheadAttention(
+            embed_dim=d_model, num_heads=num_heads, dropout=dropout, batch_first=True
+        )
+        self.norm1 = nn.LayerNorm(d_model)
+        self.ff = nn.Sequential(
+            nn.Linear(d_model, feedforward_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(feedforward_dim, d_model),
+        )
+        self.conv1 = nn.Conv1d(in_channels=d_model, out_channels=feedforward_dim, kernel_size=1)
+        self.activation = nn.GELU()
+        self.conv2 = nn.Conv1d(in_channels=feedforward_dim, out_channels=d_model, kernel_size=1)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x, mask):
+        """
+        :param x: [batch_size * num_features, seq_len, d_model]
+        :param mask: [1, 1, seq_len, seq_len]
+        :return: [batch_size * num_features, seq_len, d_model]
+        """
+        # Self-attention
+        attn_output, _ = self.attention(x, x, x, attn_mask=mask)
+        x = self.norm1(x + self.dropout(attn_output))
+
+        # Feed-forward network
+        ff_output = self.ff(x)
+        output = self.norm2(x + self.dropout(ff_output))
+
+        return output
+
+class CausalTransformer(nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        num_layers: int,
+        feedforward_dim: int,
+        dropout: float,
+    ):
+        super(CausalTransformer, self).__init__()
+
+        self.layers = nn.ModuleList(
+            [
+                TransformerEncoderBlock(d_model, num_heads, feedforward_dim, dropout)
+                for _ in range(num_layers)
+            ]
+        )
+        self.norm = nn.LayerNorm(d_model)
+
+    def forward(self, x, is_mask=True):
+        # x: [batch_size * num_features, seq_len, d_model]
+        seq_len = x.size(1)
+        mask = generate_causal_mask(seq_len).to(x.device) if is_mask else None
+        for layer in self.layers:
+            x = layer(x, mask)
+
+        x = self.norm(x)
+        return x
+
 class Model(nn.Module):
     """
     Transformer with channel independent + SimMTM
@@ -58,20 +129,29 @@ class Model(nn.Module):
         self.enc_embedding = DataEmbedding(1, configs.d_model, configs.embed, configs.freq, configs.dropout)
 
         # Encoder
-        self.encoder = Encoder(
-            [
-                EncoderLayer(
-                    AttentionLayer(
-                        DSAttention(False, configs.factor, attention_dropout=configs.dropout,
-                                    output_attention=configs.output_attention), configs.d_model, configs.n_heads),
-                    configs.d_model,
-                    configs.d_ff,
-                    dropout=configs.dropout,
-                    activation=configs.activation
-                ) for l in range(configs.e_layers)
-            ],
-            norm_layer=torch.nn.LayerNorm(configs.d_model),
+        # self.encoder = Encoder(
+        #     [
+        #         EncoderLayer(
+        #             AttentionLayer(
+        #                 DSAttention(False, configs.factor, attention_dropout=configs.dropout,
+        #                             output_attention=configs.output_attention), configs.d_model, configs.n_heads),
+        #             configs.d_model,
+        #             configs.d_ff,
+        #             dropout=configs.dropout,
+        #             activation=configs.activation
+        #         ) for l in range(configs.e_layers)
+        #     ],
+        #     norm_layer=torch.nn.LayerNorm(configs.d_model),
+        # )
+
+        self.encoder = CausalTransformer(
+            d_model=configs.d_model,
+            num_heads=configs.n_heads,
+            feedforward_dim=configs.d_ff,
+            dropout=configs.dropout,
+            num_layers=configs.e_layers,
         )
+
 
         # Decoder
         if self.task_name == 'pretrain':
@@ -121,7 +201,11 @@ class Model(nn.Module):
         enc_out = self.enc_embedding(x_enc) # enc_out: [(bs * n_vars) x seq_len x d_model]
 
         # encoder
-        enc_out, attns = self.encoder(enc_out) # enc_out: [(bs * n_vars) x seq_len x d_model]
+        # enc_out, attns = self.encoder(enc_out) # enc_out: [(bs * n_vars) x seq_len x d_model]
+        enc_out = self.encoder(
+            enc_out,
+            is_mask=False,
+        )  # [batch_size * num_features, seq_len, d_model]
 
         enc_out = torch.reshape(enc_out, (bs, n_vars, seq_len, -1)) # enc_out: [bs x n_vars x seq_len x d_model]
 
@@ -167,7 +251,12 @@ class Model(nn.Module):
 
         # encoder
         # point-wise representation
-        p_enc_out, attns = self.encoder(enc_out) # p_enc_out: [(bs * n_vars) x seq_len x d_model]  224 96 32
+        # p_enc_out, attns = self.encoder(enc_out) # p_enc_out: [(bs * n_vars) x seq_len x d_model]  224 96 32
+
+        p_enc_out = self.encoder(
+            enc_out,
+            is_mask=True,
+        )  # [batch_size * num_features, seq_len, d_model]
 
         # series-wise representation=
         s_enc_out = self.pooler(p_enc_out) # s_enc_out: [(bs * n_vars) x dimension]  224 128

@@ -129,6 +129,9 @@ class Model(nn.Module):
     def pretrain(self, x):
         # [batch_size, input_len, num_features]
         # Instance Normalization
+
+        x = torch.fft.fft(x,dim=-2).real
+
         batch_size, input_len, num_features = x.size()
         means = torch.mean(
             x, dim=1, keepdim=True
@@ -192,6 +195,9 @@ class Model(nn.Module):
         return predict_x
 
     def forecast(self, x):
+        x = torch.fft.fft(x,dim=-2).real
+
+
         batch_size, _, num_features = x.size()
         means = torch.mean(x, dim=1, keepdim=True).detach()
         x = x - means
@@ -219,6 +225,8 @@ class Model(nn.Module):
         x = x * (stdevs[:, 0, :].unsqueeze(1)).repeat(1, self.pred_len, 1)
         x = x + (means[:, 0, :].unsqueeze(1)).repeat(1, self.pred_len, 1)
 
+        x = torch.fft.ifft(x,dim=-2).real
+
         return x
 
     def forward(self, batch_x):
@@ -230,3 +238,146 @@ class Model(nn.Module):
             return dec_out[:, -self.pred_len: , :]
         else:
             raise ValueError("task_name should be 'pretrain' or 'finetune'")
+
+def get_config():
+    import argparse
+    import torch
+    import random
+    import numpy as np
+    import os
+    os.environ['CUDA_LAUNCH_BLOCKING'] = '0'
+
+    fix_seed = 2023
+    random.seed(fix_seed)
+    torch.manual_seed(fix_seed)
+    np.random.seed(fix_seed)
+
+    parser = argparse.ArgumentParser(description='SimMTM')
+
+    # basic config
+    parser.add_argument('--task_name', type=str, default='long_term_forecast',
+                        help='task name, options:[long_term_forecast, short_term_forecast, imputation, classification, anomaly_detection]')
+    parser.add_argument('--is_training', type=int, default=1, help='status')
+    parser.add_argument('--model_id', type=str, default='test', help='model id')
+    parser.add_argument('--model', type=str, default='Autoformer',
+                        help='model name, options: [Autoformer, Transformer, TimesNet]')
+
+    parser.add_argument('--train_only', type=bool, required=False, default=False,
+                        help='perform training on full input dataset without validation and testing')
+
+    # data loader
+    parser.add_argument('--data', type=str, required=False, default='ETTh1', help='dataset type')
+    parser.add_argument('--root_path', type=str, default='./datasets', help='root path of the data file')
+    parser.add_argument('--data_path', type=str, default='ETTh1.csv', help='data file')
+    parser.add_argument('--features', type=str, default='M',
+                        help='forecasting task, options:[M, S, MS]; M:multivariate predict multivariate, S:univariate predict univariate, MS:multivariate predict univariate')
+    parser.add_argument('--target', type=str, default='OT', help='target feature in S or MS task')
+    parser.add_argument('--freq', type=str, default='h',
+                        help='freq for time features encoding, options:[s:secondly, t:minutely, h:hourly, d:daily, b:business days, w:weekly, m:monthly], you can also use more detailed freq like 15min or 3h')
+    parser.add_argument('--checkpoints', type=str, default='./outputs/checkpoints/',
+                        help='location of model fine-tuning checkpoints')
+    parser.add_argument('--pretrain_checkpoints', type=str, default='./outputs/pretrain_checkpoints/',
+                        help='location of model pre-training checkpoints')
+    parser.add_argument('--transfer_checkpoints', type=str, default='ckpt_best.pth',
+                        help='checkpoints we will use to finetune, options:[ckpt_best.pth, ckpt10.pth, ckpt20.pth...]')
+    parser.add_argument('--load_checkpoints', type=str, default=None, help='location of model checkpoints')
+    parser.add_argument('--select_channels', type=float, default=1, help='select the rate of channels to train')
+
+    # forecasting task
+    parser.add_argument('--seq_len', type=int, default=336, help='input sequence length')
+    parser.add_argument('--label_len', type=int, default=48, help='start token length')
+    parser.add_argument('--pred_len', type=int, default=96, help='prediction sequence length')
+    parser.add_argument('--seasonal_patterns', type=str, default='Monthly', help='subset for M4')
+
+    # model define
+    parser.add_argument('--top_k', type=int, default=5, help='for TimesBlock')
+    parser.add_argument('--num_kernels', type=int, default=3, help='for Inception')
+    parser.add_argument('--enc_in', type=int, default=7, help='encoder input size')
+    parser.add_argument('--dec_in', type=int, default=7, help='decoder input size')
+    parser.add_argument('--c_out', type=int, default=7, help='output size')
+    parser.add_argument('--d_model', type=int, default=512, help='dimension of model')
+    parser.add_argument('--n_heads', type=int, default=8, help='num of heads')
+    parser.add_argument('--e_layers', type=int, default=2, help='num of encoder layers')
+    parser.add_argument('--d_layers', type=int, default=1, help='num of decoder layers')
+    parser.add_argument('--d_ff', type=int, default=2048, help='dimension of fcn')
+    parser.add_argument('--moving_avg', type=int, default=25, help='window size of moving average')
+    parser.add_argument('--factor', type=int, default=1, help='attn factor')
+    parser.add_argument('--distil', action='store_false',
+                        help='whether to use distilling in encoder, using this argument means not using distilling',
+                        default=True)
+    parser.add_argument('--dropout', type=float, default=0.1, help='dropout')
+    parser.add_argument('--fc_dropout', type=float, default=0, help='fully connected dropout')
+    parser.add_argument('--head_dropout', type=float, default=0.1, help='head dropout')
+    parser.add_argument('--embed', type=str, default='timeF',
+                        help='time features encoding, options:[timeF, fixed, learned]')
+    parser.add_argument('--activation', type=str, default='gelu', help='activation')
+    parser.add_argument('--output_attention', action='store_true', help='whether to output attention in ecoder')
+    parser.add_argument('--individual', type=int, default=0, help='individual head; True 1 False 0')
+    parser.add_argument('--pct_start', type=float, default=0.3, help='pct_start')
+    parser.add_argument('--patch_len', type=int, default=12, help='path length')
+    parser.add_argument('--stride', type=int, default=12, help='stride')
+
+    # optimization
+    parser.add_argument('--num_workers', type=int, default=5, help='data loader num workers')
+    parser.add_argument('--itr', type=int, default=1, help='experiments times')
+    parser.add_argument('--train_epochs', type=int, default=10, help='train epochs')
+    parser.add_argument('--batch_size', type=int, default=32, help='batch size of train input data')
+    parser.add_argument('--patience', type=int, default=3, help='early stopping patience')
+    parser.add_argument('--learning_rate', type=float, default=0.0001, help='optimizer learning rate')
+    parser.add_argument('--des', type=str, default='test', help='exp description')
+    parser.add_argument('--loss', type=str, default='MSE', help='loss function')
+    parser.add_argument('--lradj', type=str, default='type1', help='adjust learning rate')
+    parser.add_argument('--use_amp', action='store_true', help='use automatic mixed precision training', default=False)
+
+    # GPU
+    parser.add_argument('--use_gpu', type=bool, default=True, help='use gpu')
+    parser.add_argument('--gpu', type=int, default=0, help='gpu')
+    parser.add_argument('--use_multi_gpu', action='store_true', help='use multiple gpus', default=False)
+    parser.add_argument('--devices', type=str, default='0', help='device ids of multile gpus')
+
+    # Pre-train
+    parser.add_argument('--lm', type=int, default=3, help='average masking length')
+    parser.add_argument('--positive_nums', type=int, default=3, help='masking series numbers')
+    parser.add_argument('--rbtp', type=int, default=1,
+                        help='0: rebuild the embedding of oral series; 1: rebuild oral series')
+    parser.add_argument('--temperature', type=float, default=0.2, help='temperature')
+    parser.add_argument('--masked_rule', type=str, default='geometric',
+                        help='geometric, random, masked tail, masked head')
+    parser.add_argument('--mask_rate', type=float, default=0.5, help='mask ratio')
+    parser.add_argument('--device', default='cuda:0', help='device')
+    parser.add_argument('--time_steps', default=1000,type=int, help='device')
+
+    args = parser.parse_args()
+
+    return args
+
+
+
+if __name__ == '__main__':
+    configs = get_config()
+
+    configs.task_name = 'finetune'
+
+    configs.seq_len = 336
+    configs.e_layers = 3
+    configs.enc_in = 7
+    configs.dec_in = 7
+    configs.c_out = 7
+    configs.n_heads = 16
+    configs.d_model = 32
+    configs.d_ff = 64
+    configs.positive_nums = 3
+    configs.mask_rate = 0.5
+    configs.learning_rate = 0.001
+    configs.batch_size = 16
+    configs.train_epochs = 5
+    configs.input_len = 336
+    x= torch.randn(16,336,7)
+    x_mark_enc= torch.randn(16,336,4)
+    x_res= torch.randn(16,336,7)
+    configs.device = x.device
+    model = Model(configs)
+    mask = torch.ones_like(x)
+    # # x_enc 64 336 7 ; x_mark_enc 16 336 4 ； batch_x 16 336 7  mask 64 336 7
+    c = model(x,x_mark_enc,batch_x=x_res,mask=mask)
+    d = 'end'
