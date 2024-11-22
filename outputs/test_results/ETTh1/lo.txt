@@ -1,0 +1,99 @@
+D:\environments\Miniconda3_py311_23.11.0-2\envs\py310t2cu118\python.exe E:\MyCode\PyCharm_Code\TimeDART\run.py --root_path=./datasets/ETT-small/ --data_path=ETTh1.csv --model_id=ETTh1 --model=TimeDART --data=ETTh1 --features=M --input_len=336 --pred_len=96 --e_layers=2 --d_layers=1 --enc_in=7 --dec_in=7 --c_out=7 --n_heads=16 --d_model=32 --d_ff=64 --patch_len=2 --stride=2 --label_len=48 --head_dropout=0.1 --dropout=0.2 --time_steps=1000 --scheduler=cosine --lr_decay=0.9 --learning_rate=0.0001 --batch_size=16 --pct_start=0.3 --train_epochs=30 --task_name=pretrain --task_name=finetune --task_name=pretrain 
+OS is Windows!!!
+Args in experiment:
+Namespace(task_name='pretrain', is_training=1, model_id='ETTh1', model='TimeDART', data='ETTh1', root_path='./datasets/ETT-small/', data_path='ETTh1.csv', features='M', target='OT', freq='h', checkpoints='./outputs/checkpoints/', pretrain_checkpoints='./outputs/pretrain_checkpoints/', transfer_checkpoints='ckpt_best.pth', load_checkpoints=None, select_channels=1, input_len=336, label_len=48, pred_len=96, seasonal_patterns='Monthly', top_k=5, num_kernels=3, enc_in=7, dec_in=7, c_out=7, d_model=32, n_heads=16, e_layers=2, d_layers=1, d_ff=64, moving_avg=25, factor=1, distil=True, dropout=0.2, fc_dropout=0, head_dropout=0.1, embed='timeF', activation='gelu', output_attention=False, individual=0, pct_start=0.3, patch_len=2, stride=2, num_workers=0, itr=1, train_epochs=30, batch_size=16, patience=3, learning_rate=0.0001, des='test', loss='MSE', lradj='decay', use_amp=False, use_gpu=True, gpu=0, use_multi_gpu=False, devices='0', time_steps=1000, scheduler='cosine', lr_decay=0.9, real_scheduler='cosine', imag_scheduler='quad', device='cuda:0')
+Use GPU: cuda:0
+number of model params 1845232
+>>>>>>>start pre_training : pretrain_TimeDART_ETTh1_M_il336_ll48_pl96_dm32_df64_nh16_el2_dl1_fc1_dp0.2_hdp0.1_ep30_bs16_lr0.0001_ts1000_sccosine>>>>>>>>>>>>>>>>>>>>>>>>>>
+<class 'numpy.ndarray'>
+(8640, 7)
+train 8209 513
+<class 'numpy.ndarray'>
+(3216, 7)
+val 2785 174
+Current learning rate: 0.0001000
+Epoch: 1/30, Time: 52.42, Train Loss: 0.2808, Vali Loss: 0.3631
+Validation loss decreased (0.363114 --> 0.363114).  Saving model epoch0...
+Current learning rate: 0.0000900
+Epoch: 2/30, Time: 51.32, Train Loss: 0.1845, Vali Loss: 0.3150
+Validation loss decreased (0.363114 --> 0.314995).  Saving model epoch1...
+Current learning rate: 0.0000810
+Epoch: 3/30, Time: 52.27, Train Loss: 0.1648, Vali Loss: 0.2773
+Validation loss decreased (0.314995 --> 0.277251).  Saving model epoch2...
+Current learning rate: 0.0000729
+Epoch: 4/30, Time: 50.48, Train Loss: 0.1542, Vali Loss: 0.2595
+Validation loss decreased (0.277251 --> 0.259517).  Saving model epoch3...
+Current learning rate: 0.0000656
+Epoch: 5/30, Time: 50.64, Train Loss: 0.1463, Vali Loss: 0.2467
+Validation loss decreased (0.259517 --> 0.246740).  Saving model epoch4...
+Current learning rate: 0.0000590
+Epoch: 6/30, Time: 50.64, Train Loss: 0.1398, Vali Loss: 0.2342
+Validation loss decreased (0.246740 --> 0.234212).  Saving model epoch5...
+Current learning rate: 0.0000531
+Epoch: 7/30, Time: 50.63, Train Loss: 0.1346, Vali Loss: 0.2234
+Validation loss decreased (0.234212 --> 0.223435).  Saving model epoch6...
+Current learning rate: 0.0000478
+Epoch: 8/30, Time: 50.64, Train Loss: 0.1307, Vali Loss: 0.2192
+Validation loss decreased (0.223435 --> 0.219184).  Saving model epoch7...
+Current learning rate: 0.0000430
+Epoch: 9/30, Time: 50.64, Train Loss: 0.1280, Vali Loss: 0.2120
+Validation loss decreased (0.219184 --> 0.211958).  Saving model epoch8...
+Current learning rate: 0.0000387
+Epoch: 10/30, Time: 50.63, Train Loss: 0.1258, Vali Loss: 0.2076
+Validation loss decreased (0.211958 --> 0.207645).  Saving model epoch9...
+Saving model at epoch 10...
+Current learning rate: 0.0000349
+Epoch: 11/30, Time: 50.62, Train Loss: 0.1242, Vali Loss: 0.2071
+Validation loss decreased (0.207645 --> 0.207089).  Saving model epoch10...
+Current learning rate: 0.0000314
+Epoch: 12/30, Time: 50.63, Train Loss: 0.1230, Vali Loss: 0.2075
+Current learning rate: 0.0000282
+Epoch: 13/30, Time: 50.62, Train Loss: 0.1220, Vali Loss: 0.2009
+Validation loss decreased (0.207089 --> 0.200866).  Saving model epoch12...
+Current learning rate: 0.0000254
+Epoch: 14/30, Time: 50.63, Train Loss: 0.1211, Vali Loss: 0.2004
+Validation loss decreased (0.200866 --> 0.200351).  Saving model epoch13...
+Current learning rate: 0.0000229
+Epoch: 15/30, Time: 50.63, Train Loss: 0.1207, Vali Loss: 0.1958
+Validation loss decreased (0.200351 --> 0.195796).  Saving model epoch14...
+Current learning rate: 0.0000206
+Epoch: 16/30, Time: 50.63, Train Loss: 0.1198, Vali Loss: 0.1961
+Current learning rate: 0.0000185
+Epoch: 17/30, Time: 50.62, Train Loss: 0.1189, Vali Loss: 0.1989
+Current learning rate: 0.0000167
+Epoch: 18/30, Time: 50.82, Train Loss: 0.1188, Vali Loss: 0.1948
+Validation loss decreased (0.195796 --> 0.194794).  Saving model epoch17...
+Current learning rate: 0.0000150
+Epoch: 19/30, Time: 50.65, Train Loss: 0.1183, Vali Loss: 0.1937
+Validation loss decreased (0.194794 --> 0.193718).  Saving model epoch18...
+Current learning rate: 0.0000135
+Epoch: 20/30, Time: 50.75, Train Loss: 0.1177, Vali Loss: 0.1957
+Saving model at epoch 20...
+Current learning rate: 0.0000122
+Epoch: 21/30, Time: 50.73, Train Loss: 0.1175, Vali Loss: 0.1912
+Validation loss decreased (0.193718 --> 0.191194).  Saving model epoch20...
+Current learning rate: 0.0000109
+Epoch: 22/30, Time: 50.75, Train Loss: 0.1173, Vali Loss: 0.1914
+Current learning rate: 0.0000098
+Epoch: 23/30, Time: 50.76, Train Loss: 0.1171, Vali Loss: 0.1936
+Current learning rate: 0.0000089
+Epoch: 24/30, Time: 50.75, Train Loss: 0.1166, Vali Loss: 0.1908
+Validation loss decreased (0.191194 --> 0.190846).  Saving model epoch23...
+Current learning rate: 0.0000080
+Epoch: 25/30, Time: 50.76, Train Loss: 0.1165, Vali Loss: 0.1894
+Validation loss decreased (0.190846 --> 0.189409).  Saving model epoch24...
+Current learning rate: 0.0000072
+Epoch: 26/30, Time: 51.11, Train Loss: 0.1166, Vali Loss: 0.1894
+Validation loss decreased (0.189409 --> 0.189393).  Saving model epoch25...
+Current learning rate: 0.0000065
+Epoch: 27/30, Time: 53.58, Train Loss: 0.1161, Vali Loss: 0.1903
+Current learning rate: 0.0000058
+Epoch: 28/30, Time: 52.68, Train Loss: 0.1161, Vali Loss: 0.1910
+Current learning rate: 0.0000052
+Epoch: 29/30, Time: 53.46, Train Loss: 0.1159, Vali Loss: 0.1898
+Current learning rate: 0.0000047
+Epoch: 30/30, Time: 54.00, Train Loss: 0.1159, Vali Loss: 0.1925
+Saving model at epoch 30...
+
+Process finished with exit code 0
+------------------ kernel self.decomp1 = series_decomp_multi([57,87,17])
