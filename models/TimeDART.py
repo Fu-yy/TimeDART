@@ -132,10 +132,6 @@ class Model(nn.Module):
         # [batch_size, input_len, num_features]
         # Instance Normalization
 
-        # x = torch.fft.fft(x,dim=-2).real
-        mask_rate = 0.5
-        lm=3
-        positive_nums=1
         batch_size, input_len, num_features = x.size()
         means = torch.mean(
             x, dim=1, keepdim=True
@@ -145,33 +141,7 @@ class Model(nn.Module):
             torch.var(x, dim=1, keepdim=True, unbiased=False) + 1e-5
         ).detach()  # [batch_size, 1, num_features]
         x = x / stdevs  # [batch_size, input_len, num_features]
-
-        # 掩码
-        means_mask = torch.mean(
-            x_mask, dim=1, keepdim=True
-        ).detach()  # [batch_size, 1, num_features], detach from gradient
-        x_mask = x_mask - means_mask  # [batch_size, input_len, num_features]
-        stdevs_mask = torch.sqrt(
-            torch.var(x_mask, dim=1, keepdim=True, unbiased=False) + 1e-5
-        ).detach()  # [batch_size, 1, num_features]
-        x_mask = x_mask / stdevs_mask  # [batch_size, input_len, num_features]
-        # x_enc = x.masked_fill(mask == 0, 0)
-        # d = batch_x_m == x_enc
-        batch_x_om = torch.cat([x, x_mask], 0)
-        x_m_f = torch.fft.fft(x_mask,dim=-2).imag
-
-        # Channel Independence
-        x_m_f = self.channel_independence(x_m_f)  # [batch_size * num_features, input_len, 1]
-        # Patch
-        x_m_f_p = self.patch(x_m_f)  # [batch_size * num_features, seq_len, patch_len]
-        # For Casual Transformer
-        x_m_f_p_embed = self.enc_embedding(
-            x_m_f_p
-        )  # [batch_size * num_features, seq_len, d_model]
-
-        x_m_f_p_embed_biase = self.positional_encoding(x_m_f_p_embed)
-
-
+        # x = torch.fft.fft(x,dim=-2).imag
 
         # Channel Independence
         x = self.channel_independence(x)  # [batch_size * num_features, input_len, 1]
@@ -192,51 +162,32 @@ class Model(nn.Module):
         )  # [batch_size * num_features, seq_len, d_model]
 
         # Noising Diffusion
+        # x_patch = torch.fft.fft(x_patch, dim=-1).imag
         noise_x_patch, noise, t = self.diffusion(
             x_patch
         )  # [batch_size * num_features, seq_len, patch_len]
+        noise_x_patch = torch.fft.fft(noise_x_patch, dim=-2).imag
         noise_x_embedding = self.enc_embedding(
             noise_x_patch
         )  # [batch_size * num_features, seq_len, d_model]
+
         noise_x_embedding = self.positional_encoding(noise_x_embedding)
 
-
-        # For Denoising Patch Decoder
-        x_m_f_p_embed_biase_p = self.denoising_patch_decoder(
-            query=x_out,
-            key=x_m_f_p_embed_biase,
-            value=x_m_f_p_embed_biase,
-            is_tgt_mask=True,
-            is_src_mask=True,
-        )  # [batch_size * num_features, seq_len, d_model]
+        # noise_x_embedding=torch.fft.ifft(noise_x_embedding,dim=-2).imag
 
         # For Denoising Patch Decoder
         predict_x = self.denoising_patch_decoder(
             query=noise_x_embedding,
-            key=x_m_f_p_embed_biase_p,
-            value=x_m_f_p_embed_biase_p,
+            key=x_out,
+            value=x_out,
             is_tgt_mask=True,
             is_src_mask=True,
         )  # [batch_size * num_features, seq_len, d_model]
 
-
-        # predict_x = noise_x_embedding
         # For Decoder
         predict_x = predict_x.reshape(
             batch_size, num_features, -1, self.d_model
         )  # [batch_size, num_features, seq_len, d_model]
-
-        x_m_f_p_embed_biase_p = x_m_f_p_embed_biase_p.reshape(
-            batch_size, num_features, -1, self.d_model
-        )  # [batch_size, num_features, seq_len, d_model]
-
-
-
-        predict_x = x_m_f_p_embed_biase_p+predict_x
-        # predict_x = self.merge_linear(torch.cat([x_m_f_p_embed_biase_p ,predict_x],dim=-1))
-
-
-
         predict_x = self.projection(predict_x)  # [batch_size, input_len, num_features]
 
         # Instance Denormalization
