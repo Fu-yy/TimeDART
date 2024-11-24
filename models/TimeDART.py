@@ -196,7 +196,7 @@ class Model(nn.Module):
         x_mask = x_mask / stdevs_mask  # [batch_size, input_len, num_features]
         # x_enc = x.masked_fill(mask == 0, 0)
         # d = batch_x_m == x_enc
-        batch_x_om = torch.cat([x, x_mask], 0)
+        # batch_x_om = torch.cat([x, x_mask], 0)
 
         # Channel Independence
         x_m_f = self.channel_independence(x_mask)  # [batch_size * num_features, input_len, 1]
@@ -214,10 +214,10 @@ class Model(nn.Module):
 
 
         # For Denoising Patch Decoder
-        x_m_f_p_embed_biase_p = self.denoising_patch_decoder(
-            query=x_out,
-            key=x_m_f_p_embed_biase,
-            value=x_m_f_p_embed_biase,
+        x_m_f_p_embed_biase_cross = self.denoising_patch_decoder(
+            query=x_m_f_p_embed_biase,
+            key=x_out,
+            value=x_out,
             is_tgt_mask=True,
             is_src_mask=True,
         )  # [batch_size * num_features, seq_len, d_model]
@@ -225,11 +225,30 @@ class Model(nn.Module):
         # For Denoising Patch Decoder
         predict_x = self.denoising_patch_decoder(
             query=noise_x_embedding,
-            key=x_m_f_p_embed_biase_p,
-            value=x_m_f_p_embed_biase_p,
+            key=x_out,
+            value=x_out,
             is_tgt_mask=True,
             is_src_mask=True,
         )  # [batch_size * num_features, seq_len, d_model]
+
+        # predict_x = predict_x + x_m_f_p_embed_biase_cross
+        # # For Denoising Patch Decoder
+        # x_m_f_p_embed_biase_p = self.denoising_patch_decoder(
+        #     query=x_out,
+        #     key=x_m_f_p_embed_biase,
+        #     value=x_m_f_p_embed_biase,
+        #     is_tgt_mask=True,
+        #     is_src_mask=True,
+        # )  # [batch_size * num_features, seq_len, d_model]
+        #
+        # # For Denoising Patch Decoder
+        # predict_x = self.denoising_patch_decoder(
+        #     query=noise_x_embedding,
+        #     key=x_m_f_p_embed_biase_p,
+        #     value=x_m_f_p_embed_biase_p,
+        #     is_tgt_mask=True,
+        #     is_src_mask=True,
+        # )  # [batch_size * num_features, seq_len, d_model]
 
 
         # predict_x = noise_x_embedding
@@ -238,7 +257,7 @@ class Model(nn.Module):
             batch_size, num_features, -1, self.d_model
         )  # [batch_size, num_features, seq_len, d_model]
 
-        x_m_f_p_embed_biase_p = x_m_f_p_embed_biase_p.reshape(
+        x_m_f_p_embed_biase_p = x_m_f_p_embed_biase_cross.reshape(
             batch_size, num_features, -1, self.d_model
         )  # [batch_size, num_features, seq_len, d_model]
 
