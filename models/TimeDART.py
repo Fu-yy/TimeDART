@@ -10,6 +10,7 @@ from layers.TimeDART_EncDec import (
     DenoisingPatchDecoder,
 )
 from layers.Embed import Patch, PatchEmbedding, PositionalEncoding
+from utils.augmentations import masked_data
 
 
 class FlattenHead(nn.Module):
@@ -43,26 +44,26 @@ class Model(nn.Module):
     TimeDART
     """
 
-    def __init__(self, args):
+    def __init__(self, configs):
         super(Model, self).__init__()
-        self.input_len = args.input_len
+        self.input_len = configs.input_len
 
         # For Model Hyperparameters
-        self.d_model = args.d_model
-        self.num_heads = args.n_heads
-        self.feedforward_dim = args.d_ff
-        self.dropout = args.dropout
-        self.device = args.device
-        self.task_name = args.task_name
-        self.pred_len = args.pred_len
+        self.d_model = configs.d_model
+        self.num_heads = configs.n_heads
+        self.feedforward_dim = configs.d_ff
+        self.dropout = configs.dropout
+        self.device = configs.device
+        self.task_name = configs.task_name
+        self.pred_len = configs.pred_len
 
         self.channel_independence = ChannelIndependence(
             input_len=self.input_len,
         )
 
         # Patch
-        self.patch_len = args.patch_len
-        self.stride = args.stride
+        self.patch_len = configs.patch_len
+        self.stride = configs.stride
         self.patch = Patch(
             patch_len=self.patch_len,
             stride=self.stride,
@@ -89,49 +90,52 @@ class Model(nn.Module):
 
         # Encoder (Casual Trasnformer)
         self.diffusion = Diffusion(
-            time_steps=args.time_steps,
+            time_steps=configs.time_steps,
             device=self.device,
-            scheduler=args.scheduler,
+            scheduler=configs.scheduler,
         )
         self.encoder = CausalTransformer(
-            d_model=args.d_model,
-            num_heads=args.n_heads,
-            feedforward_dim=args.d_ff,
-            dropout=args.dropout,
-            num_layers=args.e_layers,
+            d_model=configs.d_model,
+            num_heads=configs.n_heads,
+            feedforward_dim=configs.d_ff,
+            dropout=configs.dropout,
+            num_layers=configs.e_layers,
         )
 
         # Decoder
         if self.task_name == "pretrain":
             self.denoising_patch_decoder = DenoisingPatchDecoder(
-                d_model=args.d_model,
-                num_layers=args.d_layers,
-                num_heads=args.n_heads,
-                feedforward_dim=args.d_ff,
-                dropout=args.dropout,
+                d_model=configs.d_model,
+                num_layers=configs.d_layers,
+                num_heads=configs.n_heads,
+                feedforward_dim=configs.d_ff,
+                dropout=configs.dropout,
             )
 
             self.projection = FlattenHead(
                 seq_len=self.seq_len,
                 d_model=self.d_model,
-                pred_len=args.input_len,
-                dropout=args.head_dropout,
+                pred_len=configs.input_len,
+                dropout=configs.head_dropout,
             )
 
         elif self.task_name == "finetune":
             self.head = FlattenHead(
                 seq_len=self.seq_len,
-                d_model=args.d_model,
-                pred_len=args.pred_len,
-                dropout=args.head_dropout,
+                d_model=configs.d_model,
+                pred_len=configs.pred_len,
+                dropout=configs.head_dropout,
             )
+        self.merge_linear = nn.Linear(self.d_model * 2, self.d_model)
 
-    def pretrain(self, x):
+    def pretrain(self, x,x_mask):
         # [batch_size, input_len, num_features]
         # Instance Normalization
 
-        x = torch.fft.fft(x,dim=-2).real
-
+        # x = torch.fft.fft(x,dim=-2).real
+        mask_rate = 0.5
+        lm=3
+        positive_nums=1
         batch_size, input_len, num_features = x.size()
         means = torch.mean(
             x, dim=1, keepdim=True
@@ -141,6 +145,33 @@ class Model(nn.Module):
             torch.var(x, dim=1, keepdim=True, unbiased=False) + 1e-5
         ).detach()  # [batch_size, 1, num_features]
         x = x / stdevs  # [batch_size, input_len, num_features]
+
+        # 掩码
+        means_mask = torch.mean(
+            x_mask, dim=1, keepdim=True
+        ).detach()  # [batch_size, 1, num_features], detach from gradient
+        x_mask = x_mask - means_mask  # [batch_size, input_len, num_features]
+        stdevs_mask = torch.sqrt(
+            torch.var(x_mask, dim=1, keepdim=True, unbiased=False) + 1e-5
+        ).detach()  # [batch_size, 1, num_features]
+        x_mask = x_mask / stdevs_mask  # [batch_size, input_len, num_features]
+        # x_enc = x.masked_fill(mask == 0, 0)
+        # d = batch_x_m == x_enc
+        batch_x_om = torch.cat([x, x_mask], 0)
+        x_m_f = torch.fft.fft(x_mask,dim=-2).imag
+
+        # Channel Independence
+        x_m_f = self.channel_independence(x_m_f)  # [batch_size * num_features, input_len, 1]
+        # Patch
+        x_m_f_p = self.patch(x_m_f)  # [batch_size * num_features, seq_len, patch_len]
+        # For Casual Transformer
+        x_m_f_p_embed = self.enc_embedding(
+            x_m_f_p
+        )  # [batch_size * num_features, seq_len, d_model]
+
+        x_m_f_p_embed_biase = self.positional_encoding(x_m_f_p_embed)
+
+
 
         # Channel Independence
         x = self.channel_independence(x)  # [batch_size * num_features, input_len, 1]
@@ -169,19 +200,43 @@ class Model(nn.Module):
         )  # [batch_size * num_features, seq_len, d_model]
         noise_x_embedding = self.positional_encoding(noise_x_embedding)
 
+
         # For Denoising Patch Decoder
-        predict_x = self.denoising_patch_decoder(
-            query=noise_x_embedding,
-            key=x_out,
-            value=x_out,
+        x_m_f_p_embed_biase_p = self.denoising_patch_decoder(
+            query=x_out,
+            key=x_m_f_p_embed_biase,
+            value=x_m_f_p_embed_biase,
             is_tgt_mask=True,
             is_src_mask=True,
         )  # [batch_size * num_features, seq_len, d_model]
 
+        # For Denoising Patch Decoder
+        predict_x = self.denoising_patch_decoder(
+            query=noise_x_embedding,
+            key=x_m_f_p_embed_biase_p,
+            value=x_m_f_p_embed_biase_p,
+            is_tgt_mask=True,
+            is_src_mask=True,
+        )  # [batch_size * num_features, seq_len, d_model]
+
+
+        # predict_x = noise_x_embedding
         # For Decoder
         predict_x = predict_x.reshape(
             batch_size, num_features, -1, self.d_model
         )  # [batch_size, num_features, seq_len, d_model]
+
+        x_m_f_p_embed_biase_p = x_m_f_p_embed_biase_p.reshape(
+            batch_size, num_features, -1, self.d_model
+        )  # [batch_size, num_features, seq_len, d_model]
+
+
+
+        predict_x = x_m_f_p_embed_biase_p+predict_x
+        # predict_x = self.merge_linear(torch.cat([x_m_f_p_embed_biase_p ,predict_x],dim=-1))
+
+
+
         predict_x = self.projection(predict_x)  # [batch_size, input_len, num_features]
 
         # Instance Denormalization
@@ -191,11 +246,12 @@ class Model(nn.Module):
         predict_x = predict_x + (means[:, 0, :].unsqueeze(1)).repeat(
             1, input_len, 1
         )  # [batch_size, input_len, num_features]
+        # predict_x = torch.fft.ifft(predict_x,dim=-2).real
 
         return predict_x
 
-    def forecast(self, x):
-        x = torch.fft.fft(x,dim=-2).real
+    def forecast(self, x,x_mark):
+        # x = torch.fft.fft(x,dim=-2).real
 
 
         batch_size, _, num_features = x.size()
@@ -225,16 +281,16 @@ class Model(nn.Module):
         x = x * (stdevs[:, 0, :].unsqueeze(1)).repeat(1, self.pred_len, 1)
         x = x + (means[:, 0, :].unsqueeze(1)).repeat(1, self.pred_len, 1)
 
-        x = torch.fft.ifft(x,dim=-2).real
+        # x = torch.fft.ifft(x,dim=-2).real
 
         return x
 
-    def forward(self, batch_x):
+    def forward(self, batch_x,x_mask):
 
         if self.task_name == "pretrain":
-            return self.pretrain(batch_x)
+            return self.pretrain(batch_x,x_mask)
         elif self.task_name == "finetune":
-            dec_out = self.forecast(batch_x)
+            dec_out = self.forecast(batch_x,x_mask)
             return dec_out[:, -self.pred_len: , :]
         else:
             raise ValueError("task_name should be 'pretrain' or 'finetune'")
@@ -346,17 +402,30 @@ def get_config():
     parser.add_argument('--mask_rate', type=float, default=0.5, help='mask ratio')
     parser.add_argument('--device', default='cuda:0', help='device')
     parser.add_argument('--time_steps', default=1000,type=int, help='device')
+    # Pre-train
 
-    args = parser.parse_args()
+    parser.add_argument(
+        "--scheduler", type=str, default="cosine", help="scheduler in diffusion"
+    )
 
-    return args
+    parser.add_argument("--lr_decay", type=float, default=0.5, help="learning rate decay")
+    parser.add_argument(
+        "--real_scheduler", type=str, default="cosine", help="real_scheduler in diffusion"
+    )
+    parser.add_argument(
+        "--imag_scheduler", type=str, default="quad", help="imag_scheduler in diffusion"
+    )
+
+    configs = parser.parse_args()
+
+    return configs
 
 
 
 if __name__ == '__main__':
     configs = get_config()
 
-    configs.task_name = 'finetune'
+    configs.task_name = 'pretrain'
 
     configs.seq_len = 336
     configs.e_layers = 3
@@ -375,9 +444,11 @@ if __name__ == '__main__':
     x= torch.randn(16,336,7)
     x_mark_enc= torch.randn(16,336,4)
     x_res= torch.randn(16,336,7)
+
+
     configs.device = x.device
     model = Model(configs)
     mask = torch.ones_like(x)
     # # x_enc 64 336 7 ; x_mark_enc 16 336 4 ； batch_x 16 336 7  mask 64 336 7
-    c = model(x,x_mark_enc,batch_x=x_res,mask=mask)
+    c = model(x,x_mark_enc)
     d = 'end'

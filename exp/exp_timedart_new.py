@@ -170,8 +170,9 @@ class Exp_TimeDART(Exp_Basic):
 
             batch_x = batch_x.float().to(self.device)
             batch_y = batch_y.float().to(self.device)
+            batch_x_mark = batch_x_mark.float().to(self.device)
 
-            pred_x = self.model(batch_x)
+            pred_x = self.model(batch_x,batch_x_mark)
             diff_loss = model_criterion(pred_x, batch_x)
             diff_loss.backward()
 
@@ -194,8 +195,9 @@ class Exp_TimeDART(Exp_Basic):
             ):
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float().to(self.device)
+                batch_x_mark = batch_x_mark.float().to(self.device)
 
-                pred_x = self.model(batch_x)
+                pred_x = self.model(batch_x,batch_x_mark)
                 diff_loss = model_criterion(pred_x, batch_x)
                 vali_loss.append(diff_loss.item())
 
@@ -244,8 +246,9 @@ class Exp_TimeDART(Exp_Basic):
 
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float().to(self.device)
+                batch_x_mark = batch_x_mark.float().to(self.device)
 
-                pred_x = self.model(batch_x)
+                pred_x = self.model(batch_x,batch_x_mark)
 
                 f_dim = -1 if self.args.features == "MS" else 0
 
@@ -318,8 +321,9 @@ class Exp_TimeDART(Exp_Basic):
             ):
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float().to(self.device)
+                batch_x_mark = batch_x_mark.float().to(self.device)
 
-                pred_x = self.model(batch_x)
+                pred_x = self.model(batch_x,batch_x_mark)
 
                 f_dim = -1 if self.args.features == "MS" else 0
 
@@ -354,8 +358,9 @@ class Exp_TimeDART(Exp_Basic):
             ):
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float().to(self.device)
+                batch_x_mark = batch_x_mark.float().to(self.device)
 
-                pred_x = self.model(batch_x)
+                pred_x = self.model(batch_x,batch_x_mark)
 
                 f_dim = -1 if self.args.features == "MS" else 0
 

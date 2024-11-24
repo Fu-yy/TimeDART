@@ -1,9 +1,0 @@
-Epoch: 1, Steps: 531, Time: 65.32s | Train Loss: 0.4350666 Vali Loss: 0.5820238 Test Loss: 0.4037111
-Epoch: 2, Steps: 531, Time: 63.93s | Train Loss: 0.3264494 Vali Loss: 0.5159471 Test Loss: 0.3473208
-Epoch: 3, Steps: 531, Time: 64.10s | Train Loss: 0.3083682 Vali Loss: 0.5060186 Test Loss: 0.3374269
-Epoch: 4, Steps: 531, Time: 64.67s | Train Loss: 0.3038529 Vali Loss: 0.5026939 Test Loss: 0.3342468
-Epoch: 5, Steps: 531, Time: 65.55s | Train Loss: 0.3020289 Vali Loss: 0.5044630 Test Loss: 0.3321067
-Epoch: 6, Steps: 531, Time: 64.29s | Train Loss: 0.3009929 Vali Loss: 0.5022253 Test Loss: 0.3312372
-Epoch: 7, Steps: 531, Time: 64.37s | Train Loss: 0.3005425 Vali Loss: 0.5028185 Test Loss: 0.3308101
-Epoch: 8, Steps: 531, Time: 66.57s | Train Loss: 0.3003669 Vali Loss: 0.5024666 Test Loss: 0.3306755
-Epoch: 9, Steps: 531, Time: 65.43s | Train Loss: 0.3001582 Vali Loss: 0.5023911 Test Loss: 0.3307496

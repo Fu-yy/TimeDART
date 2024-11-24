@@ -164,15 +164,26 @@ class Exp_TimeDART(Exp_Basic):
         ):
             model_optim.zero_grad()
 
+            mask_rate = 0.5
+            lm = 3
+            positive_nums = 1
+            batch_x_m, batch_x_mark_m, mask = masked_data(batch_x, batch_x_mark, mask_rate, lm,
+                                                          positive_nums)
+
             batch_x = batch_x.float().to(self.device)
             batch_y = batch_y.float().to(self.device)
+            batch_x_mark = batch_x_mark.float().to(self.device)
+
+
+            batch_x_m = batch_x_m.float().to(self.device)
+
             if self.args.model == 'TimeDART_my':
             # pred_x = self.model(batch_x)
                 diff_loss = self.model(batch_x)
                 # diff_loss.requires_grad = True
             # diff_loss = model_criterion(pred_x, batch_x)
             else:
-                pred_x = self.model(batch_x)
+                pred_x = self.model(batch_x,batch_x_m)
                 # diff_loss = self.model(batch_x)
                 diff_loss = model_criterion(pred_x, batch_x)
             # diff_loss.requires_grad = True
@@ -195,15 +206,24 @@ class Exp_TimeDART(Exp_Basic):
             for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(
                 vali_loader
             ):
+
+                mask_rate = 0.5
+                lm = 3
+                positive_nums = 1
+                batch_x_m, batch_x_mark_m, mask = masked_data(batch_x, batch_x_mark, mask_rate, lm,
+                                                              positive_nums)
+
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float().to(self.device)
+                batch_x_mark = batch_x_mark.float().to(self.device)
 
+                batch_x_m = batch_x_m.float().to(self.device)
                 if self.args.model == 'TimeDART_my':
                     # pred_x = self.model(batch_x)
                     diff_loss = self.model(batch_x)
                 # diff_loss = model_criterion(pred_x, batch_x)
                 else:
-                    pred_x = self.model(batch_x)
+                    pred_x = self.model(batch_x,batch_x_m)
                     # diff_loss = self.model(batch_x)
                     diff_loss = model_criterion(pred_x, batch_x)
 
@@ -255,8 +275,9 @@ class Exp_TimeDART(Exp_Basic):
 
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float().to(self.device)
+                batch_x_mark = batch_x_mark.float().to(self.device)
 
-                pred_x = self.model(batch_x)
+                pred_x = self.model(batch_x,batch_x_mark)
 
                 f_dim = -1 if self.args.features == "MS" else 0
 
@@ -329,8 +350,9 @@ class Exp_TimeDART(Exp_Basic):
             ):
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float().to(self.device)
+                batch_x_mark = batch_x_mark.float().to(self.device)
 
-                pred_x = self.model(batch_x)
+                pred_x = self.model(batch_x,batch_x_mark)
 
                 f_dim = -1 if self.args.features == "MS" else 0
 
@@ -366,7 +388,9 @@ class Exp_TimeDART(Exp_Basic):
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float().to(self.device)
 
-                pred_x = self.model(batch_x)
+                batch_x_mark = batch_x_mark.float().to(self.device)
+
+                pred_x = self.model(batch_x,batch_x_mark)
 
                 f_dim = -1 if self.args.features == "MS" else 0
 
