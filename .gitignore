@@ -25,6 +25,7 @@ var/
 datasets/
 dataset/
 wheels/
+outputs
 pip-wheel-metadata/
 share/python-wheels/
 *.egg-info/
