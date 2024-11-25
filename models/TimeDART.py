@@ -1,7 +1,8 @@
 import torch
 import torch.nn as nn
+from einops import rearrange, repeat
 from layers.Transformer_EncDec import Decoder, DecoderLayer, Encoder, EncoderLayer
-from layers.SelfAttention_Family import DSAttention, AttentionLayer
+from layers.SelfAttention_Family import DSAttention, AttentionLayer, FullAttention
 from layers.TimeDART_EncDec import (
     ChannelIndependence,
     AddSosTokenAndDropLast,
@@ -101,7 +102,11 @@ class Model(nn.Module):
             dropout=configs.dropout,
             num_layers=configs.e_layers,
         )
-
+        self.router = nn.Parameter(torch.randn(self.seq_len, 1, configs.d_model))
+        self.dim_sender = AttentionLayer(FullAttention(False, 1, attention_dropout=configs.dropout,
+                                                       output_attention=configs.output_attention), configs.d_model, configs.n_heads)
+        self.dim_receiver = AttentionLayer(FullAttention(False, 1, attention_dropout=configs.dropout,
+                                                         output_attention=configs.output_attention), configs.d_model, configs.n_heads)
         # Decoder
         if self.task_name == "pretrain":
             self.denoising_patch_decoder = DenoisingPatchDecoder(
@@ -111,6 +116,8 @@ class Model(nn.Module):
                 feedforward_dim=configs.d_ff,
                 dropout=configs.dropout,
             )
+
+
 
             self.projection = FlattenHead(
                 seq_len=self.seq_len,
@@ -154,6 +161,7 @@ class Model(nn.Module):
         x = self.channel_independence(x)  # [batch_size * num_features, input_len, 1]
         # Patch
         x_patch = self.patch(x)  # [batch_size * num_features, seq_len, patch_len]
+        # x_patch_f = torch.fft.fft(x_patch,dim=-2).imag
 
         # For Casual Transformer
         x_embedding = self.enc_embedding(
@@ -175,7 +183,7 @@ class Model(nn.Module):
             x_patch
         )  # [batch_size * num_features, seq_len, patch_len]
 
-        noise_x_patch = torch.fft.fft(noise_x_patch,dim=-2).imag
+        # noise_x_patch = torch.fft.fft(noise_x_patch,dim=-2).imag
 
         noise_x_embedding = self.enc_embedding(
             noise_x_patch
@@ -186,41 +194,39 @@ class Model(nn.Module):
 
 
         # 掩码   begin--------------------------
-        means_mask = torch.mean(
-            x_mask, dim=1, keepdim=True
-        ).detach()  # [batch_size, 1, num_features], detach from gradient
-        x_mask = x_mask - means_mask  # [batch_size, input_len, num_features]
-        stdevs_mask = torch.sqrt(
-            torch.var(x_mask, dim=1, keepdim=True, unbiased=False) + 1e-5
-        ).detach()  # [batch_size, 1, num_features]
-        x_mask = x_mask / stdevs_mask  # [batch_size, input_len, num_features]
-        # x_enc = x.masked_fill(mask == 0, 0)
-        # d = batch_x_m == x_enc
-        # batch_x_om = torch.cat([x, x_mask], 0)
-
-        # Channel Independence
-        x_m_f = self.channel_independence(x_mask)  # [batch_size * num_features, input_len, 1]
-        # Patch
-        x_m_f_p = self.patch(x_m_f)  # [batch_size * num_features, seq_len, patch_len]
-        # For Casual Transformer
-        x_m_f_p = torch.fft.fft(x_m_f_p,dim=-2).imag
-        x_m_f_p_embed = self.enc_embedding(
-            x_m_f_p
-        )  # [batch_size * num_features, seq_len, d_model]
-
-        x_m_f_p_embed_biase = self.positional_encoding(x_m_f_p_embed)
+        # means_mask = torch.mean(
+        #     x_mask, dim=1, keepdim=True
+        # ).detach()  # [batch_size, 1, num_features], detach from gradient
+        # x_mask = x_mask - means_mask  # [batch_size, input_len, num_features]
+        # stdevs_mask = torch.sqrt(
+        #     torch.var(x_mask, dim=1, keepdim=True, unbiased=False) + 1e-5
+        # ).detach()  # [batch_size, 1, num_features]
+        # x_mask = x_mask / stdevs_mask  # [batch_size, input_len, num_features]
+        #
+        #
+        # # Channel Independence
+        # x_m_f = self.channel_independence(x_mask)  # [batch_size * num_features, input_len, 1]
+        # # Patch
+        # x_m_f_p = self.patch(x_m_f)  # [batch_size * num_features, seq_len, patch_len]
+        # # For Casual Transformer
+        # x_m_f_p = torch.fft.fft(x_m_f_p,dim=-2).imag
+        # x_m_f_p_embed = self.enc_embedding(
+        #     x_m_f_p
+        # )  # [batch_size * num_features, seq_len, d_model]
+        #
+        # x_m_f_p_embed_biase = self.positional_encoding(x_m_f_p_embed)
         # 掩码   end--------------------------
 
 
 
         # For Denoising Patch Decoder
-        x_m_f_p_embed_biase_cross = self.denoising_patch_decoder(
-            query=x_m_f_p_embed_biase,
-            key=x_out,
-            value=x_out,
-            is_tgt_mask=True,
-            is_src_mask=True,
-        )  # [batch_size * num_features, seq_len, d_model]
+        # x_m_f_p_embed_biase_cross = self.denoising_patch_decoder(
+        #     query=x_m_f_p_embed_biase,
+        #     key=x_out,
+        #     value=x_out,
+        #     is_tgt_mask=True,
+        #     is_src_mask=True,
+        # )  # [batch_size * num_features, seq_len, d_model]
 
         # For Denoising Patch Decoder
         predict_x = self.denoising_patch_decoder(
@@ -231,24 +237,6 @@ class Model(nn.Module):
             is_src_mask=True,
         )  # [batch_size * num_features, seq_len, d_model]
 
-        # predict_x = predict_x + x_m_f_p_embed_biase_cross
-        # # For Denoising Patch Decoder
-        # x_m_f_p_embed_biase_p = self.denoising_patch_decoder(
-        #     query=x_out,
-        #     key=x_m_f_p_embed_biase,
-        #     value=x_m_f_p_embed_biase,
-        #     is_tgt_mask=True,
-        #     is_src_mask=True,
-        # )  # [batch_size * num_features, seq_len, d_model]
-        #
-        # # For Denoising Patch Decoder
-        # predict_x = self.denoising_patch_decoder(
-        #     query=noise_x_embedding,
-        #     key=x_m_f_p_embed_biase_p,
-        #     value=x_m_f_p_embed_biase_p,
-        #     is_tgt_mask=True,
-        #     is_src_mask=True,
-        # )  # [batch_size * num_features, seq_len, d_model]
 
 
         # predict_x = noise_x_embedding
@@ -257,13 +245,22 @@ class Model(nn.Module):
             batch_size, num_features, -1, self.d_model
         )  # [batch_size, num_features, seq_len, d_model]
 
-        x_m_f_p_embed_biase_p = x_m_f_p_embed_biase_cross.reshape(
-            batch_size, num_features, -1, self.d_model
-        )  # [batch_size, num_features, seq_len, d_model]
+        # x_m_f_p_embed_biase_p = x_m_f_p_embed_biase_cross.reshape(
+        #     batch_size, num_features, -1, self.d_model
+        # )  # [batch_size, num_features, seq_len, d_model]
 
 
 
-        predict_x = x_m_f_p_embed_biase_p+predict_x
+        # predict_x = x_m_f_p_embed_biase_p+predict_x
+
+        dim_send = rearrange(predict_x, 'b nvar seg_num d_model -> (b seg_num) nvar d_model', b=batch_size)
+        batch_router = repeat(self.router, 'seg_num factor d_model -> (repeat seg_num) factor d_model', repeat=batch_size)
+        dim_buffer, attn = self.dim_sender(batch_router, dim_send, dim_send, attn_mask=None, tau=None,
+                                           delta=None)  # 256 1 64
+        dim_receive, attn = self.dim_receiver(dim_send, dim_buffer, dim_buffer, attn_mask=None, tau=None,
+                                              delta=None)  # 256 7 64
+        predict_x = rearrange(dim_receive, '(b seg_num) nvar d_model  -> b nvar seg_num d_model', b=batch_size)
+
         # predict_x = self.merge_linear(torch.cat([x_m_f_p_embed_biase_p ,predict_x],dim=-1))
 
 
@@ -295,6 +292,10 @@ class Model(nn.Module):
 
         x = self.channel_independence(x)  # [batch_size * num_features, input_len, 1]
         x = self.patch(x)  # [batch_size * num_features, seq_len, patch_len]
+
+
+        # x = torch.fft.fft(x,dim=-2).imag
+
         x = self.enc_embedding(x)  # [batch_size * num_features, seq_len, d_model]
         x = self.positional_encoding(x)  # [batch_size * num_features, seq_len, d_model]
         x = self.encoder(
@@ -305,6 +306,19 @@ class Model(nn.Module):
             batch_size, num_features, -1, self.d_model
         )  # [batch_size, num_features, seq_len, d_model]
 
+        dim_send = rearrange(x, 'b nvar seg_num d_model -> (b seg_num) nvar d_model', b=batch_size)
+        batch_router = repeat(self.router, 'seg_num factor d_model -> (repeat seg_num) factor d_model',
+                              repeat=batch_size)
+        dim_buffer, attn = self.dim_sender(batch_router, dim_send, dim_send, attn_mask=None, tau=None,
+                                           delta=None)  # 256 1 64
+        dim_receive, attn = self.dim_receiver(dim_send, dim_buffer, dim_buffer, attn_mask=None, tau=None,
+                                              delta=None)  # 256 7 64
+        x = rearrange(dim_receive, '(b seg_num) nvar d_model  -> b nvar seg_num d_model', b=batch_size)
+
+
+
+
+        # x = torch.fft.ifft(x,dim=-2).real
         # forecast
         x = self.head(x)  # [bs, pred_len, n_vars]
 
@@ -312,7 +326,6 @@ class Model(nn.Module):
         x = x * (stdevs[:, 0, :].unsqueeze(1)).repeat(1, self.pred_len, 1)
         x = x + (means[:, 0, :].unsqueeze(1)).repeat(1, self.pred_len, 1)
 
-        # x = torch.fft.ifft(x,dim=-2).real
 
         return x
 
