@@ -16,6 +16,8 @@ eggs/
 .eggs/
 lib/
 run_log/
+.idea
+.idea/
 outputs/
 checkpoints/
 lib64/
