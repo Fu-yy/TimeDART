@@ -142,8 +142,16 @@ class Model(nn.Module):
         self.task_name = configs.task_name
         self.pred_len = configs.pred_len
 
-        self.channel_independence = ChannelIndependence(
-            input_len=self.input_len,
+        # self.channel_independence = ChannelIndependence(
+        #     input_len=self.input_len,
+        # )
+
+        self.channel_independence = nn.ModuleList(
+            [ChannelIndependence(
+                input_len=self.input_len // (configs.down_sampling_window ** i),
+            )
+                for i in range(configs.down_sampling_layers + 1)
+            ]
         )
 
         # Patch
@@ -317,7 +325,7 @@ class Model(nn.Module):
         for i,x in enumerate(x_down):
             x, trend = self.decomp_multi(x)
             # Channel Independence
-            x = self.channel_independence(x)  # [batch_size * num_features, input_len, 1]
+            x = self.channel_independence[i](x)  # [batch_size * num_features, input_len, 1]
             # Patch
             x_patch = self.patch(x)  # [batch_size * num_features, seq_len, patch_len]
             # x_patch, trend = self.decomp_multi(x_patch)
@@ -398,7 +406,7 @@ class Model(nn.Module):
 
             x, trend = self.decomp_multi(x)
 
-            x = self.channel_independence(x)  # [batch_size * num_features, input_len, 1]
+            x = self.channel_independence[i](x)  # [batch_size * num_features, input_len, 1]
             x = self.patch(x)  # [batch_size * num_features, seq_len, patch_len]
 
 
@@ -576,7 +584,7 @@ def get_config():
 if __name__ == '__main__':
     configs = get_config()
 
-    configs.task_name = 'finetune'
+    configs.task_name = 'pretrain'
 
     configs.seq_len = 336
     configs.e_layers = 3
@@ -596,7 +604,7 @@ if __name__ == '__main__':
     configs.down_sampling_layers = 2
     configs.down_sampling_window = 2
 
-    x= torch.randn(16,336,7)
+    x= torch.randn(1,336,7)
     x_mark_enc= torch.randn(16,336,4)
     x_res= torch.randn(16,336,7)
 
