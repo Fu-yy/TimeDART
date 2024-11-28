@@ -183,6 +183,10 @@ parser.add_argument(
     "--imag_scheduler", type=str, default="quad", help="imag_scheduler in diffusion"
 )
 
+parser.add_argument("--down_sampling_method", type=str, default='avg', help="down_sampling_method")
+parser.add_argument('--down_sampling_window', type=int, default=1, help='down sampling window size')
+parser.add_argument('--down_sampling_layers', type=int, default=2, help='num of down sampling layers')
+
 parser.add_argument('--GT_d_model', type=int, default=512)
 parser.add_argument('--GT_d_ff', type=int, default=2048)
 parser.add_argument('--token_len', type=int, default=48)
