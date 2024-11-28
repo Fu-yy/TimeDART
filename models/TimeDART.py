@@ -311,35 +311,39 @@ class Model(nn.Module):
         ).detach()  # [batch_size, 1, num_features]
         x = x / stdevs  # [batch_size, input_len, num_features]
 
+
+        x, trend = self.decomp_multi(x)
+        # Channel Independence
+        x = self.channel_independence(x)  # [batch_size * num_features, input_len, 1]
+        # Patch
+        x_patch = self.patch(x)  # [batch_size * num_features, seq_len, patch_len]
+        # x_patch, trend = self.decomp_multi(x_patch)
+        # x_patch_f = torch.fft.fft(x_patch,dim=-2).imag
+
+        # For Casual Transformer
+        x_embedding = self.enc_embedding(
+            x_patch
+        )  # [batch_size * num_features, seq_len, d_model]
+        x_embedding_bias = self.add_sos_token_and_drop_last(
+            x_embedding
+        )  # [batch_size * num_features, seq_len, d_model]
+        x_embedding_bias = self.positional_encoding(x_embedding_bias)
+        x_embedding_bias, trend1 = self.decomp_multi(x_embedding_bias)
+
+        x_out = self.encoder(
+            x_embedding_bias,
+            is_mask=True,
+        )  # [batch_size * num_features, seq_len, d_model]
         # 1. 用原始的x做下采样
-        x_down ,_ =self.__multi_scale_process_inputs(x,None)
+        x_down, _ = self.__multi_scale_process_inputs(x_patch, None)
+        x_out_down, _ = self.__multi_scale_process_inputs(x_out, None)
         down_res_predicrt_list = []
-        for i,x in enumerate(x_down):
-            x, trend = self.decomp_multi(x)
-            # Channel Independence
-            x = self.channel_independence(x)  # [batch_size * num_features, input_len, 1]
-            # Patch
-            x_patch = self.patch(x)  # [batch_size * num_features, seq_len, patch_len]
-            # x_patch, trend = self.decomp_multi(x_patch)
-            # x_patch_f = torch.fft.fft(x_patch,dim=-2).imag
+        for i, (x_patch_i,x_out_i) in enumerate(zip(x_down,x_out_down)):
 
-            # For Casual Transformer
-            x_embedding = self.enc_embedding(
-                x_patch
-            )  # [batch_size * num_features, seq_len, d_model]
-            x_embedding_bias = self.add_sos_token_and_drop_last(
-                x_embedding
-            )  # [batch_size * num_features, seq_len, d_model]
-            x_embedding_bias = self.positional_encoding(x_embedding_bias)
-            x_embedding_bias, trend1 = self.decomp_multi(x_embedding_bias)
-
-            x_out = self.encoder(
-                x_embedding_bias,
-                is_mask=True,
-            )  # [batch_size * num_features, seq_len, d_model]
+            x_patch_i, trend2 = self.decomp_multi(x_patch_i)
 
             noise_x_patch, noise, t = self.diffusion(
-                x_patch
+                x_patch_i
             )  # [batch_size * num_features, seq_len, patch_len]
 
             # noise_x_patch = torch.fft.fft(noise_x_patch,dim=-2).imag
@@ -355,21 +359,24 @@ class Model(nn.Module):
             # For Denoising Patch Decoder
             predict_x = self.denoising_patch_decoder(
                 query=noise_x_embedding,
-                key=x_out,
-                value=x_out,
+                key=x_out_i,
+                value=x_out_i,
                 is_tgt_mask=True,
                 is_src_mask=True,
             )  # [batch_size * num_features, seq_len, d_model]
+
+
             predict_x = predict_x.reshape(
                 batch_size, num_features, -1, self.d_model
             )  # [batch_size, num_features, seq_len, d_model]
             predict_x = self.projection[i](predict_x)  # [batch_size, input_len, num_features]
-            predict_x = predict_x + self.regression[i](trend.permute(0,2,1)).permute(0,2,1).contiguous()
             down_res_predicrt_list.append(predict_x)
 
-        predict_x = 0
-        for item in down_res_predicrt_list:
+        predict_x = self.regression[0](trend.permute(0,2,1)).permute(0,2,1).contiguous()
+        for i,item in enumerate(down_res_predicrt_list):
             predict_x = item + predict_x
+            # predict_x = predict_x + self.regression[i](trend.permute(0,2,1)).permute(0,2,1).contiguous()
+
         # Instance Denormalization
         predict_x = predict_x * (stdevs[:, 0, :].unsqueeze(1)).repeat(
             1, input_len, 1
@@ -392,45 +399,40 @@ class Model(nn.Module):
             torch.var(x, dim=1, keepdim=True, unbiased=False) + 1e-5
         ).detach()
         x = x / stdevs
-        x_down ,_ =self.__multi_scale_process_inputs(x,None)
-        down_res_predicrt_list = []
-        for i,x in enumerate(x_down):
 
-            x, trend = self.decomp_multi(x)
+        x, trend = self.decomp_multi(x)
 
-            x = self.channel_independence(x)  # [batch_size * num_features, input_len, 1]
-            x = self.patch(x)  # [batch_size * num_features, seq_len, patch_len]
+        x = self.channel_independence(x)  # [batch_size * num_features, input_len, 1]
+        x = self.patch(x)  # [batch_size * num_features, seq_len, patch_len]
 
 
-            # x = torch.fft.fft(x,dim=-2).imag
+        # x = torch.fft.fft(x,dim=-2).imag
 
-            x = self.enc_embedding(x)  # [batch_size * num_features, seq_len, d_model]
-            x = self.positional_encoding(x)  # [batch_size * num_features, seq_len, d_model]
+        x = self.enc_embedding(x)  # [batch_size * num_features, seq_len, d_model]
+        x = self.positional_encoding(x)  # [batch_size * num_features, seq_len, d_model]
 
-            x, trend1 = self.decomp_multi(x)
+        x, trend1 = self.decomp_multi(x)
 
-            x = self.encoder(
-                x,
-                is_mask=False,
-            )  # [batch_size * num_features, seq_len, d_model]
-            x = x.reshape(
-                batch_size, num_features, -1, self.d_model
-            )  # [batch_size, num_features, seq_len, d_model]
-            # x = torch.fft.ifft(x,dim=-2).real
-            # forecast
-            x = self.head[i](x)  # [bs, pred_len, n_vars]
-            x = x + self.regression[i](trend.permute(0, 2, 1)).permute(0, 2, 1).contiguous()
-            down_res_predicrt_list.append(x)
+        x = self.encoder(
+            x,
+            is_mask=False,
+        )  # [batch_size * num_features, seq_len, d_model]
+        x = x.reshape(
+            batch_size, num_features, -1, self.d_model
+        )  # [batch_size, num_features, seq_len, d_model]
+        # x = torch.fft.ifft(x,dim=-2).real
+        # forecast
+        x = self.head[0](x)  # [bs, pred_len, n_vars]
+        x = x + self.regression[0](trend.permute(0, 2, 1)).permute(0, 2, 1).contiguous()
 
-        predict_x = 0
-        for item in down_res_predicrt_list:
-            predict_x = item + predict_x
+
+
         # denormalization
-        predict_x = predict_x * (stdevs[:, 0, :].unsqueeze(1)).repeat(1, self.pred_len, 1)
-        predict_x = predict_x + (means[:, 0, :].unsqueeze(1)).repeat(1, self.pred_len, 1)
+        x = x * (stdevs[:, 0, :].unsqueeze(1)).repeat(1, self.pred_len, 1)
+        x = x + (means[:, 0, :].unsqueeze(1)).repeat(1, self.pred_len, 1)
 
 
-        return predict_x
+        return x
 
     def forward(self, batch_x,x_mask):
 
@@ -576,7 +578,7 @@ def get_config():
 if __name__ == '__main__':
     configs = get_config()
 
-    configs.task_name = 'finetune'
+    configs.task_name = 'pretrain'
 
     configs.seq_len = 336
     configs.e_layers = 3
