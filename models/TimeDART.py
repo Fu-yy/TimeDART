@@ -247,9 +247,14 @@ class Model(nn.Module):
                 nn.Linear(self.input_len // (configs.down_sampling_window ** i), configs.pred_len)
                 for i in range(configs.down_sampling_layers + 1)
             ])
+        kernel_list = [15,7,5]
 
+        self.decomp_all = series_decomp(95)
         self.merge_linear = nn.Linear(self.d_model * 2, self.d_model)
-        self.decomp_multi = series_decomp(95)
+        self.decomp_multi = nn.ModuleList([
+                series_decomp(k)
+            for k in kernel_list
+        ])
 
     def __multi_scale_process_inputs(self, x_enc, x_mark_enc):
         if self.configs.down_sampling_method == 'max':
@@ -312,7 +317,7 @@ class Model(nn.Module):
         x = x / stdevs  # [batch_size, input_len, num_features]
 
 
-        x, trend = self.decomp_multi(x)
+        x, trend = self.decomp_all(x)
         # Channel Independence
         x = self.channel_independence(x)  # [batch_size * num_features, input_len, 1]
         # Patch
@@ -328,7 +333,7 @@ class Model(nn.Module):
             x_embedding
         )  # [batch_size * num_features, seq_len, d_model]
         x_embedding_bias = self.positional_encoding(x_embedding_bias)
-        x_embedding_bias, trend1 = self.decomp_multi(x_embedding_bias)
+        x_embedding_bias, trend1 = self.decomp_multi[0](x_embedding_bias)
 
         x_out = self.encoder(
             x_embedding_bias,
@@ -340,7 +345,7 @@ class Model(nn.Module):
         down_res_predicrt_list = []
         for i, (x_patch_i,x_out_i) in enumerate(zip(x_down,x_out_down)):
 
-            x_patch_i, trend2 = self.decomp_multi(x_patch_i)
+            x_patch_i, trend2 = self.decomp_multi[i](x_patch_i)
 
             noise_x_patch, noise, t = self.diffusion(
                 x_patch_i
@@ -353,7 +358,7 @@ class Model(nn.Module):
             )  # [batch_size * num_features, seq_len, d_model]
             noise_x_embedding = self.positional_encoding(noise_x_embedding)
             # noise end --------------------------
-            noise_x_embedding, trend2 = self.decomp_multi(noise_x_embedding)
+            noise_x_embedding, trend2 = self.decomp_multi[i](noise_x_embedding)
 
 
             # For Denoising Patch Decoder
@@ -372,9 +377,9 @@ class Model(nn.Module):
             predict_x = self.projection[i](predict_x)  # [batch_size, input_len, num_features]
             down_res_predicrt_list.append(predict_x)
 
-        predict_x = self.regression[0](trend.permute(0,2,1)).permute(0,2,1).contiguous()
+        # predict_x = self.regression[0](trend.permute(0,2,1)).permute(0,2,1).contiguous()
         for i,item in enumerate(down_res_predicrt_list):
-            predict_x = item + predict_x
+            predict_x = item + self.regression[0](trend.permute(0,2,1)).permute(0,2,1).contiguous()
             # predict_x = predict_x + self.regression[i](trend.permute(0,2,1)).permute(0,2,1).contiguous()
 
         # Instance Denormalization
@@ -400,7 +405,7 @@ class Model(nn.Module):
         ).detach()
         x = x / stdevs
 
-        x, trend = self.decomp_multi(x)
+        x, trend = self.decomp_multi[0](x)
 
         x = self.channel_independence(x)  # [batch_size * num_features, input_len, 1]
         x = self.patch(x)  # [batch_size * num_features, seq_len, patch_len]
@@ -411,7 +416,7 @@ class Model(nn.Module):
         x = self.enc_embedding(x)  # [batch_size * num_features, seq_len, d_model]
         x = self.positional_encoding(x)  # [batch_size * num_features, seq_len, d_model]
 
-        x, trend1 = self.decomp_multi(x)
+        x, trend1 = self.decomp_multi[0](x)
 
         x = self.encoder(
             x,
@@ -579,6 +584,7 @@ if __name__ == '__main__':
     configs = get_config()
 
     configs.task_name = 'pretrain'
+    # configs.task_name = 'finetune'
 
     configs.seq_len = 336
     configs.e_layers = 3
@@ -598,7 +604,7 @@ if __name__ == '__main__':
     configs.down_sampling_layers = 2
     configs.down_sampling_window = 2
 
-    x= torch.randn(16,336,7)
+    x= torch.randn(32,336,7)
     x_mark_enc= torch.randn(16,336,4)
     x_res= torch.randn(16,336,7)
 
