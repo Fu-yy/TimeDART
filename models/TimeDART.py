@@ -277,6 +277,17 @@ class Model(nn.Module):
 
         self.merge_linear = nn.Linear(self.d_model * 2, self.d_model)
         self.decomp_multi = series_decomp(95)
+        denoise_layers = 3
+        self.denoise_layers = nn.ModuleList([
+            DenoisingPatchDecoder(
+                d_model=configs.d_model,
+                num_layers=configs.d_layers,
+                num_heads=configs.n_heads,
+                feedforward_dim=configs.d_ff,
+                dropout=configs.dropout,
+            )
+            for _ in range(denoise_layers)
+        ])
 
 
 
@@ -364,18 +375,19 @@ class Model(nn.Module):
             is_mask=True,
         )  # [batch_size * num_features, seq_len, d_model]
 
-        # 1. 用原始的x做下采样
-        down_res_predicrt_list = []
-        x_down, _ = self.__multi_scale_process_inputs(x_patch, None)
-        x_out_down, _ = self.__multi_scale_process_inputs(x_out, None)
-        for i,(item,x_patch_item) in enumerate(zip(x_down, x_out_down)):
-            item, _ = self.decomp_multi(item)
+        res_pred = []
+        for layer in self.denoise_layers:
+            x = self.channel_independence[0](x)  # [batch_size * num_features, input_len, 1]
+            # Patch
+            x_patch = self.patch(x)  # [batch_size * num_features, seq_len, patch_len]
 
-            noise_x_patch, noise, t = self.diffusion(
-                item
+            # item = x_out
+            x_patch, _ = self.decomp_multi(x_patch)
+
+            noise_x_patch, _, _ = self.diffusion(
+                x_patch
             )  # [batch_size * num_features, seq_len, patch_len]
 
-            # noise_x_patch = torch.fft.fft(noise_x_patch,dim=-2).imag
 
             noise_x_embedding = self.enc_embedding(
                 noise_x_patch
@@ -383,27 +395,30 @@ class Model(nn.Module):
             noise_x_embedding = self.positional_encoding(noise_x_embedding)
             # noise end --------------------------
             noise_x_embedding, _ = self.decomp_multi(noise_x_embedding)
+            x_out, _ = self.decomp_multi(x_out)
 
 
             # For Denoising Patch Decoder
-            predict_x = self.denoising_patch_decoder(
+            denoise_out = layer(
                 query=noise_x_embedding,
-                key=x_patch_item,
-                value=x_patch_item,
+                key=x_out,
+                value=x_out,
                 is_tgt_mask=True,
                 is_src_mask=True,
             )  # [batch_size * num_features, seq_len, d_model]
-            predict_x = predict_x.reshape(
+
+
+
+            denoise_out = denoise_out.reshape(
                 batch_size, num_features, -1, self.d_model
             )  # [batch_size, num_features, seq_len, d_model]
-            predict_x = self.projection[i](predict_x)  # [batch_size, input_len, num_features]
-            predict_x = predict_x + self.regression[i](trend.permute(0,2,1)).permute(0,2,1).contiguous()
-            down_res_predicrt_list.append(predict_x)
+            denoise_out = self.projection[0](denoise_out)  # [batch_size, input_len, num_features]
+            x = denoise_out
 
-        # predict_x = self.regression[0](trend.permute(0,2,1)).permute(0,2,1).contiguous()
-        predict_x = 0
-        for item in down_res_predicrt_list:
-            predict_x = item + predict_x
+
+            predict_x = denoise_out + self.regression[0](trend.permute(0,2,1)).permute(0,2,1).contiguous()
+            # res_pred.append(predict_x)
+
         # Instance Denormalization
         predict_x = predict_x * (stdevs[:, 0, :].unsqueeze(1)).repeat(
             1, input_len, 1
@@ -446,7 +461,7 @@ class Model(nn.Module):
         # x = torch.fft.ifft(x,dim=-2).real
         # forecast
         x = self.head(x)  # [bs, pred_len, n_vars]
-        x = x + self.regression(trend.permute(0, 2, 1)).permute(0, 2, 1).contiguous()
+        x = x + self.regression[0](trend.permute(0, 2, 1)).permute(0, 2, 1).contiguous()
 
         # denormalization
         x = x * (stdevs[:, 0, :].unsqueeze(1)).repeat(1, self.pred_len, 1)
