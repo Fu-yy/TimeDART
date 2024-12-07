@@ -277,7 +277,7 @@ class Model(nn.Module):
 
         self.merge_linear = nn.Linear(self.d_model * 2, self.d_model)
         self.decomp_multi = series_decomp(95)
-        denoise_layers = 3
+        self.denoise_layers_num = configs.denoise_layers_num
         self.denoise_layers = nn.ModuleList([
             DenoisingPatchDecoder(
                 d_model=configs.d_model,
@@ -286,7 +286,7 @@ class Model(nn.Module):
                 feedforward_dim=configs.d_ff,
                 dropout=configs.dropout,
             )
-            for _ in range(denoise_layers)
+            for _ in range(self.denoise_layers_num)
         ])
 
 
