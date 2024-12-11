@@ -15,33 +15,6 @@ from layers.TimeDART_EncDec import (
 from layers.Embed import Patch, PatchEmbedding, PositionalEncoding
 from utils.augmentations import masked_data
 
-
-class FlattenHead(nn.Module):
-    def __init__(
-        self,
-        seq_len: int,
-        d_model: int,
-        pred_len: int,
-        dropout: float,
-    ):
-        super(FlattenHead, self).__init__()
-        self.pred_len = pred_len
-        self.flatten = nn.Flatten(start_dim=-2)
-        self.forecast_head = nn.Linear(seq_len * d_model, pred_len)
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        :param x: [batch_size, num_features, seq_len, d_model]
-        :return: [batch_size, pred_len, num_features]
-        """
-        x = self.flatten(x)  # (batch_size, num_features, seq_len * d_model)
-        x = self.forecast_head(x)  # (batch_size, num_features, pred_len)
-        x = self.dropout(x)  # (batch_size, num_features, pred_len)
-        x = x.permute(0, 2, 1)  # (batch_size, pred_len, num_features)
-        return x
-
-
 class ComplexFrequencyCrossAttention(nn.Module):
     def __init__(self, embed_dim, num_heads, sparsity_threshold=0.01):
         """
@@ -123,6 +96,73 @@ class ComplexFrequencyCrossAttention(nn.Module):
         time_out = torch.fft.irfft(freq_out, n=T, dim=1, norm='ortho')  # [B, T, D]
 
         return time_out
+class FlattenHead(nn.Module):
+    def __init__(
+        self,
+        seq_len: int,
+        d_model: int,
+        pred_len: int,
+        dropout: float,
+    ):
+        super(FlattenHead, self).__init__()
+        self.pred_len = pred_len
+        self.flatten = nn.Flatten(start_dim=-2)
+        self.forecast_head = nn.Linear(seq_len * d_model, pred_len)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        :param x: [batch_size, num_features, seq_len, d_model]
+        :return: [batch_size, pred_len, num_features]
+        """
+        x = self.flatten(x)  # (batch_size, num_features, seq_len * d_model)
+        x = self.forecast_head(x)  # (batch_size, num_features, pred_len)
+        x = self.dropout(x)  # (batch_size, num_features, pred_len)
+        x = x.permute(0, 2, 1)  # (batch_size, pred_len, num_features)
+        return x
+
+
+import torch
+import torch.nn as nn
+
+
+class TrendExtractorConv(nn.Module):
+    def __init__(self, input_dim, d_model, kernel_size=3):
+        super(TrendExtractorConv, self).__init__()
+        self.conv = nn.Conv1d(in_channels=input_dim, out_channels=d_model, kernel_size=kernel_size,
+                              padding=kernel_size // 2)
+        self.activation = nn.ReLU()
+        self.pool = nn.AdaptiveAvgPool1d(1)  # 将每个特征图压缩为一个值
+
+    def forward(self, x):
+        # x: [batch_size, seq_len, input_dim]
+        x = x.permute(0, 2, 1)  # [batch_size, input_dim, seq_len]
+        x = self.conv(x)  # [batch_size, d_model, seq_len]
+        x = self.activation(x)
+        x = self.pool(x)  # [batch_size, d_model, 1]
+        x = x.squeeze(-1)  # [batch_size, d_model]
+        trend = x.unsqueeze(1)  # [batch_size, 1, d_model]
+        return trend
+
+
+class ConditionalEncoding(nn.Module):
+    def __init__(self, input_dim, d_model):
+        super(ConditionalEncoding, self).__init__()
+        self.trend_extractor = TrendExtractorConv(input_dim, d_model)
+        self.condition_proj = nn.Linear(d_model, d_model)
+        self.activation = nn.ReLU()
+
+    def forward(self, x):
+        """
+        x: [batch_size, seq_len, input_dim]
+        返回: [batch_size, 1, d_model]
+        """
+        trend = self.trend_extractor(x)  # [batch_size, 1, d_model]
+        cond_encoded = self.condition_proj(trend)  # [batch_size, 1, d_model]
+        cond_encoded = self.activation(cond_encoded)
+        return cond_encoded
+
+
 class Model(nn.Module):
     """
     TimeDART
@@ -142,10 +182,6 @@ class Model(nn.Module):
         self.task_name = configs.task_name
         self.pred_len = configs.pred_len
 
-        # self.channel_independence = ChannelIndependence(
-        #     input_len=self.input_len,
-        # )
-
         self.channel_independence = nn.ModuleList(
             [ChannelIndependence(
                 input_len=self.input_len // (configs.down_sampling_window ** i),
@@ -153,6 +189,8 @@ class Model(nn.Module):
                 for i in range(configs.down_sampling_layers + 1)
             ]
         )
+
+
 
         # Patch
         self.patch_len = configs.patch_len
@@ -194,11 +232,13 @@ class Model(nn.Module):
             dropout=configs.dropout,
             num_layers=configs.e_layers,
         )
-        self.router = nn.Parameter(torch.randn(self.seq_len, 1, configs.d_model))
-        self.dim_sender = AttentionLayer(FullAttention(False, 1, attention_dropout=configs.dropout,
-                                                       output_attention=configs.output_attention), configs.d_model, configs.n_heads)
-        self.dim_receiver = AttentionLayer(FullAttention(False, 1, attention_dropout=configs.dropout,
-                                                         output_attention=configs.output_attention), configs.d_model, configs.n_heads)
+
+        # 条件编码模块
+        # 假设条件信息维度为 configs.condition_dim
+        self.conditional_encoding = ConditionalEncoding(
+            input_dim=self.d_model,
+            d_model=self.d_model
+        )
         # Decoder
         if self.task_name == "pretrain":
             self.denoising_patch_decoder = DenoisingPatchDecoder(
@@ -225,14 +265,7 @@ class Model(nn.Module):
                     for i in range(configs.down_sampling_layers + 1)
                 ]
             )
-            self.regression = nn.ModuleList([
-                nn.Linear(self.input_len // (configs.down_sampling_window ** i), self.input_len)
-                for i in range(configs.down_sampling_layers + 1)
-            ])
-            self.regression = nn.ModuleList([
-                nn.Linear(self.input_len, self.input_len)
-                for i in range(configs.down_sampling_layers + 1)
-            ])
+
 
 
 
@@ -255,11 +288,6 @@ class Model(nn.Module):
                 ]
             )
 
-            # self.regression = nn.Linear(self.input_len, configs.pred_len)
-            self.regression = nn.ModuleList([
-                nn.Linear(self.input_len // (configs.down_sampling_window ** i), configs.pred_len)
-                for i in range(configs.down_sampling_layers + 1)
-            ])
 
             self.head = FlattenHead(
                     seq_len=self.seq_len,
@@ -269,10 +297,8 @@ class Model(nn.Module):
                 )
 
 
-            self.regression = nn.ModuleList([
-                nn.Linear(self.input_len, configs.pred_len)
-                for i in range(configs.down_sampling_layers + 1)
-            ])
+        self.regression =nn.Linear(self.input_len, configs.pred_len)
+
 
 
         self.merge_linear = nn.Linear(self.d_model * 2, self.d_model)
@@ -291,46 +317,6 @@ class Model(nn.Module):
 
 
 
-    def __multi_scale_process_inputs(self, x_enc, x_mark_enc):
-        if self.configs.down_sampling_method == 'max':
-            down_pool = torch.nn.MaxPool1d(self.configs.down_sampling_window, return_indices=False)
-        elif self.configs.down_sampling_method == 'avg':
-            down_pool = torch.nn.AvgPool1d(self.configs.down_sampling_window)
-        elif self.configs.down_sampling_method == 'conv':
-            padding = 1 if torch.__version__ >= '1.5.0' else 2
-            down_pool = nn.Conv1d(in_channels=self.configs.enc_in, out_channels=self.configs.enc_in,
-                                  kernel_size=3, padding=padding,
-                                  stride=self.configs.down_sampling_window,
-                                  padding_mode='circular',
-                                  bias=False)
-        else:
-            return x_enc, x_mark_enc
-        # B,T,C -> B,C,T
-        x_enc = x_enc.permute(0, 2, 1)
-
-        x_enc_ori = x_enc
-        # x_mark_enc_mark_ori = x_mark_enc
-
-        x_enc_sampling_list = []
-        # x_mark_sampling_list = []
-        x_enc_sampling_list.append(x_enc.permute(0, 2, 1))
-        # x_mark_sampling_list.append(x_mark_enc)
-
-        for i in range(self.configs.down_sampling_layers):
-            x_enc_sampling = down_pool(x_enc_ori)
-
-            x_enc_sampling_list.append(x_enc_sampling.permute(0, 2, 1))
-
-            # x_mark_sampling_list.append(x_mark_enc_mark_ori[:, ::self.configs.down_sampling_window, :])
-
-            x_enc_ori = x_enc_sampling
-
-            # x_mark_enc_mark_ori = x_mark_enc_mark_ori[:, ::self.configs.down_sampling_window, :]
-
-        x_enc = x_enc_sampling_list
-        # x_mark_enc = x_mark_sampling_list
-
-        return x_enc, None
 
     def pretrain(self, x,x_mask):
 
@@ -364,9 +350,29 @@ class Model(nn.Module):
         x_embedding = self.enc_embedding(
             x_patch
         )  # [batch_size * num_features, seq_len, d_model]
+
+
+
+
+
+
         x_embedding_bias = self.add_sos_token_and_drop_last(
             x_embedding
         )  # [batch_size * num_features, seq_len, d_model]
+
+        # --------------------------- 添加条件 begin
+        # 获取条件编码
+        # cond_encoded = self.conditional_encoding(x_embedding)  # [batch_size, 1, d_model]
+        # # 扩展条件编码以匹配批次和特征维度
+        # cond_encoded = cond_encoded.repeat_interleave(x_embedding.size(0) // cond_encoded.size(0),
+        #                                               dim=0)  # [batch_size * num_features, 1, d_model]
+        # cond_encoded = cond_encoded.expand(-1, x_embedding.size(1), -1)  # [batch_size * num_features, seq_len, d_model]
+        #
+        # # 将条件编码添加到嵌入中
+        # x_embedding_bias = x_embedding + cond_encoded  # 结合条件编码
+
+        # --------------------------- 添加条件 end
+
         x_embedding_bias = self.positional_encoding(x_embedding_bias)
         x_embedding_bias, _ = self.decomp_multi(x_embedding_bias)
 
@@ -374,6 +380,9 @@ class Model(nn.Module):
             x_embedding_bias,
             is_mask=True,
         )  # [batch_size * num_features, seq_len, d_model]
+
+
+
 
         res_pred = []
         for layer in self.denoise_layers:
@@ -397,6 +406,19 @@ class Model(nn.Module):
             noise_x_embedding, _ = self.decomp_multi(noise_x_embedding)
             x_out, _ = self.decomp_multi(x_out)
 
+            # --------------------------- 添加条件 begin
+            # 获取条件编码
+            cond_encoded = self.conditional_encoding(x_out)  # [batch_size, 1, d_model]
+            # 扩展条件编码以匹配批次和特征维度
+            cond_encoded = cond_encoded.repeat_interleave(x_out.size(0) // cond_encoded.size(0),
+                                                          dim=0)  # [batch_size * num_features, 1, d_model]
+            cond_encoded = cond_encoded.expand(-1, x_out.size(1), -1)  # [batch_size * num_features, seq_len, d_model]
+
+            # 将条件编码添加到嵌入中
+            x_out = x_out + cond_encoded  # 结合条件编码
+
+            # --------------------------- 添加条件 end
+
 
             # For Denoising Patch Decoder
             denoise_out = layer(
@@ -416,7 +438,7 @@ class Model(nn.Module):
             x = denoise_out
 
 
-            predict_x = denoise_out + self.regression[0](trend.permute(0,2,1)).permute(0,2,1).contiguous()
+            predict_x = denoise_out + self.regression(trend.permute(0,2,1)).permute(0,2,1).contiguous()
             # res_pred.append(predict_x)
 
         # Instance Denormalization
@@ -447,6 +469,24 @@ class Model(nn.Module):
 
         # x = torch.fft.fft(x,dim=-2).imag
         x = self.enc_embedding(x)  # [batch_size * num_features, seq_len, d_model]
+
+
+        # --------------------------- 添加条件 begin
+        # 获取条件编码
+        # cond_encoded = self.conditional_encoding(x)  # [batch_size, 1, d_model]
+        # # 扩展条件编码以匹配批次和特征维度
+        # cond_encoded = cond_encoded.repeat_interleave(x.size(0) // cond_encoded.size(0),
+        #                                               dim=0)  # [batch_size * num_features, 1, d_model]
+        # cond_encoded = cond_encoded.expand(-1, x.size(1), -1)  # [batch_size * num_features, seq_len, d_model]
+        #
+        # # 将条件编码添加到嵌入中
+        # x = x + cond_encoded  # 结合条件编码
+
+        # --------------------------- 添加条件 end
+
+
+
+
         x = self.positional_encoding(x)  # [batch_size * num_features, seq_len, d_model]
 
         x, _ = self.decomp_multi(x)
@@ -597,6 +637,7 @@ def get_config():
     parser.add_argument("--down_sampling_method", type=str, default='avg', help="down_sampling_method")
     parser.add_argument('--down_sampling_window', type=int, default=1, help='down sampling window size')
     parser.add_argument('--down_sampling_layers', type=int, default=2, help='num of down sampling layers')
+    parser.add_argument('--denoise_layers_num', type=int, default=3, help='num of denoise_layers_num')
 
     parser.add_argument(
         "--real_scheduler", type=str, default="cosine", help="real_scheduler in diffusion"
