@@ -14,33 +14,7 @@ from layers.TimeDART_EncDec import (
 )
 from layers.Embed import Patch, PatchEmbedding, PositionalEncoding
 from utils.augmentations import masked_data
-
-
-class FlattenHead(nn.Module):
-    def __init__(
-        self,
-        seq_len: int,
-        d_model: int,
-        pred_len: int,
-        dropout: float,
-    ):
-        super(FlattenHead, self).__init__()
-        self.pred_len = pred_len
-        self.flatten = nn.Flatten(start_dim=-2)
-        self.forecast_head = nn.Linear(seq_len * d_model, pred_len)
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        :param x: [batch_size, num_features, seq_len, d_model]
-        :return: [batch_size, pred_len, num_features]
-        """
-        x = self.flatten(x)  # (batch_size, num_features, seq_len * d_model)
-        x = self.forecast_head(x)  # (batch_size, num_features, pred_len)
-        x = self.dropout(x)  # (batch_size, num_features, pred_len)
-        x = x.permute(0, 2, 1)  # (batch_size, pred_len, num_features)
-        return x
-
+import torch.nn.functional as F
 
 class ComplexFrequencyCrossAttention(nn.Module):
     def __init__(self, embed_dim, num_heads, sparsity_threshold=0.01):
@@ -123,6 +97,203 @@ class ComplexFrequencyCrossAttention(nn.Module):
         time_out = torch.fft.irfft(freq_out, n=T, dim=1, norm='ortho')  # [B, T, D]
 
         return time_out
+class FlattenHead(nn.Module):
+    def __init__(
+        self,
+        seq_len: int,
+        d_model: int,
+        pred_len: int,
+        dropout: float,
+    ):
+        super(FlattenHead, self).__init__()
+        self.pred_len = pred_len
+        self.flatten = nn.Flatten(start_dim=-2)
+        self.forecast_head = nn.Linear(seq_len * d_model, pred_len)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        :param x: [batch_size, num_features, seq_len, d_model]
+        :return: [batch_size, pred_len, num_features]
+        """
+        x = self.flatten(x)  # (batch_size, num_features, seq_len * d_model)
+        x = self.forecast_head(x)  # (batch_size, num_features, pred_len)
+        x = self.dropout(x)  # (batch_size, num_features, pred_len)
+        x = x.permute(0, 2, 1)  # (batch_size, pred_len, num_features)
+        return x
+
+
+import torch
+import torch.nn as nn
+
+
+class TrendExtractorConv(nn.Module):
+    def __init__(self, input_dim, d_model, kernel_size=3):
+        super(TrendExtractorConv, self).__init__()
+        self.conv = nn.Conv1d(in_channels=input_dim, out_channels=d_model, kernel_size=kernel_size,
+                              padding=kernel_size // 2)
+        self.activation = nn.ReLU()
+        # self.pool = nn.AdaptiveAvgPool1d(1)  # 将每个特征图压缩为一个值
+
+    def forward(self, x):
+        # x: [batch_size, seq_len, input_dim]
+        x = x.permute(0, 2, 1)  # [batch_size, input_dim, seq_len]
+        x = self.conv(x)  # [batch_size, d_model, seq_len]
+        x = self.activation(x)
+        # x = self.pool(x)  # [batch_size, d_model, 1]
+        # x = x.squeeze(-1)  # [batch_size, d_model]
+        # trend = x.unsqueeze(1)  # [batch_size, 1, d_model]
+        return x.permute(0, 2, 1).contiguous()
+
+
+class ConditionalEncoding(nn.Module):
+    def __init__(self, input_dim, d_model):
+        super(ConditionalEncoding, self).__init__()
+        self.trend_extractor = TrendExtractorConv(input_dim, d_model)
+        self.condition_proj = nn.Linear(d_model, d_model)
+        self.activation = nn.ReLU()
+
+    def forward(self, x):
+        """
+        x: [batch_size, seq_len, input_dim]
+        返回: [batch_size, 1, d_model]
+        """
+        trend = self.trend_extractor(x)  # [batch_size, 1, d_model]
+        cond_encoded = self.condition_proj(trend)  # [batch_size, 1, d_model]
+        cond_encoded = self.activation(cond_encoded)
+        return cond_encoded
+
+
+class SeqAttention(nn.Module):
+    def __init__(self, target_dim, embed_dim, num_heads=1,dropout=0.1):
+        super(SeqAttention, self).__init__()
+        self.target_dim = target_dim
+        # self.num_lags = num_lags
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        # 线性变换用于查询、键、值
+        # self.query = nn.Linear(target_dim, embed_dim)
+        # self.key = nn.Linear(target_dim, embed_dim)
+        # self.value = nn.Linear(target_dim, embed_dim)
+        #
+        # # 多头注意力
+        # self.attention = nn.MultiheadAttention(embed_dim, num_heads, batch_first=True)
+        # self.fc = nn.Linear(embed_dim, target_dim)
+
+
+
+
+        # -----
+
+        # self.self_attention = nn.MultiheadAttention(
+        #     embed_dim=target_dim, num_heads=num_heads, dropout=dropout, batch_first=True
+        # )
+        self.norm1 = nn.LayerNorm(target_dim)
+        # self.encoder_attention = nn.MultiheadAttention(
+        #     embed_dim=target_dim, num_heads=num_heads, dropout=dropout, batch_first=True
+        # )
+        self.norm2 = nn.LayerNorm(target_dim)
+        self.ff = nn.Sequential(
+            nn.Linear(target_dim, embed_dim*2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(embed_dim*2, target_dim),
+        )
+        self.norm3 = nn.LayerNorm(target_dim)
+        self.dropout = nn.Dropout(dropout)
+
+
+    def compute_attention(self, q, k, v):
+        scores = torch.matmul(q, k) / torch.sqrt(torch.tensor(q.size(-1)))
+        attn_weights = F.softmax(scores, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+        output = torch.matmul(attn_weights, v)
+        return output, attn_weights
+
+    def forward(self,lags):
+        # lags: (batch_size, sub_seq_len, target_dim, num_lags)
+        batch_size, sub_seq_len, target_dim = lags.size()
+        # 重塑为 (batch_size, sub_seq_len * num_lags, target_dim)
+        # lags = lags.permute(0,1,3,2).contiguous()
+        # lags = torch.reshape(lags, (batch_size, sub_seq_len , target_dim))
+        query= lags
+        key = lags.permute(0,2,1).contiguous()
+        value = lags
+        # Self-attention
+        # attn_output, _ = self.self_attention(query, query, query, attn_mask=None)
+        attn_output,_ = self.compute_attention(query, key, value)
+
+        query = self.norm1(query + self.dropout(attn_output))
+
+        # # Encoder attention
+        # attn_output, _ = self.encoder_attention(query, key, value, attn_mask=None)
+        # query = self.norm2(query + self.dropout(attn_output))
+
+        # Feed-forward network
+        ff_output = self.ff(query)
+        output = self.norm3(query + self.dropout(ff_output))
+
+
+
+        # 重塑回 (batch_size, sub_seq_len, target_dim, num_lags)
+        # output = torch.reshape(output, (batch_size, sub_seq_len , num_lags, target_dim)).permute(0, 1, 3, 2)
+
+        return output
+
+
+class DenoisingConditionDecoder(nn.Module):
+    def __init__(self, embed_dim, num_heads=1,dropout=0.1):
+        super(DenoisingConditionDecoder, self).__init__()
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.norm2 = nn.LayerNorm(embed_dim)
+        self.ff = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim*2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(embed_dim*2, embed_dim),
+        )
+        self.dropout = nn.Dropout(dropout)
+        self.gate = nn.Linear(embed_dim * 2, embed_dim)
+        self.sigmoid = nn.Sigmoid()
+
+
+
+    def compute_attention(self, q, k, v):
+        scores = torch.matmul(q, k) / torch.sqrt(torch.tensor(q.size(-1)))
+        attn_weights = F.softmax(scores, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+        output = torch.matmul(attn_weights, v)
+        return output, attn_weights
+
+    def forward(self,Noise_x,X,cond):
+
+        # ------------------------------
+        # 融合 Q 和 cond
+        combined = torch.cat([Noise_x, cond], dim=-1)  # [batch_size, seq_len, embed_dim * 2]
+        gate = self.sigmoid(self.gate(combined))  # [batch_size, seq_len, embed_dim]
+        fused = gate * Noise_x + (1 - gate) * cond  # 融合后的表示
+        # ------------------------------
+
+
+        query= fused
+        key = X.permute(0,2,1).contiguous()
+        value = X
+        attn_output,_ = self.compute_attention(query, key, value)
+
+        query = self.norm1(query + self.dropout(attn_output))
+
+        # Feed-forward network
+        ff_output = self.ff(query)
+        output = self.norm2(query + self.dropout(ff_output))
+        return output
+
+
+
+
+
+
 class Model(nn.Module):
     """
     TimeDART
@@ -142,10 +313,6 @@ class Model(nn.Module):
         self.task_name = configs.task_name
         self.pred_len = configs.pred_len
 
-        # self.channel_independence = ChannelIndependence(
-        #     input_len=self.input_len,
-        # )
-
         self.channel_independence = nn.ModuleList(
             [ChannelIndependence(
                 input_len=self.input_len // (configs.down_sampling_window ** i),
@@ -153,6 +320,8 @@ class Model(nn.Module):
                 for i in range(configs.down_sampling_layers + 1)
             ]
         )
+
+
 
         # Patch
         self.patch_len = configs.patch_len
@@ -194,11 +363,20 @@ class Model(nn.Module):
             dropout=configs.dropout,
             num_layers=configs.e_layers,
         )
-        self.router = nn.Parameter(torch.randn(self.seq_len, 1, configs.d_model))
-        self.dim_sender = AttentionLayer(FullAttention(False, 1, attention_dropout=configs.dropout,
-                                                       output_attention=configs.output_attention), configs.d_model, configs.n_heads)
-        self.dim_receiver = AttentionLayer(FullAttention(False, 1, attention_dropout=configs.dropout,
-                                                         output_attention=configs.output_attention), configs.d_model, configs.n_heads)
+
+        # 条件编码模块
+        # 假设条件信息维度为 configs.condition_dim
+        self.conditional_encoding = ConditionalEncoding(
+            input_dim=self.d_model,
+            d_model=self.d_model
+        )
+        # 在 Model 类中替换 ConditionalEncoding
+        # self.conditional_encoding_att = SeqAttention(
+        #     target_dim=self.d_model,
+        #     num_heads=self.num_heads,
+        #     embed_dim=self.d_model,
+        #     dropout=self.dropout,
+        # )
         # Decoder
         if self.task_name == "pretrain":
             self.denoising_patch_decoder = DenoisingPatchDecoder(
@@ -289,48 +467,14 @@ class Model(nn.Module):
             for _ in range(self.denoise_layers_num)
         ])
 
-
-
-    def __multi_scale_process_inputs(self, x_enc, x_mark_enc):
-        if self.configs.down_sampling_method == 'max':
-            down_pool = torch.nn.MaxPool1d(self.configs.down_sampling_window, return_indices=False)
-        elif self.configs.down_sampling_method == 'avg':
-            down_pool = torch.nn.AvgPool1d(self.configs.down_sampling_window)
-        elif self.configs.down_sampling_method == 'conv':
-            padding = 1 if torch.__version__ >= '1.5.0' else 2
-            down_pool = nn.Conv1d(in_channels=self.configs.enc_in, out_channels=self.configs.enc_in,
-                                  kernel_size=3, padding=padding,
-                                  stride=self.configs.down_sampling_window,
-                                  padding_mode='circular',
-                                  bias=False)
-        else:
-            return x_enc, x_mark_enc
-        # B,T,C -> B,C,T
-        x_enc = x_enc.permute(0, 2, 1)
-
-        x_enc_ori = x_enc
-        # x_mark_enc_mark_ori = x_mark_enc
-
-        x_enc_sampling_list = []
-        # x_mark_sampling_list = []
-        x_enc_sampling_list.append(x_enc.permute(0, 2, 1))
-        # x_mark_sampling_list.append(x_mark_enc)
-
-        for i in range(self.configs.down_sampling_layers):
-            x_enc_sampling = down_pool(x_enc_ori)
-
-            x_enc_sampling_list.append(x_enc_sampling.permute(0, 2, 1))
-
-            # x_mark_sampling_list.append(x_mark_enc_mark_ori[:, ::self.configs.down_sampling_window, :])
-
-            x_enc_ori = x_enc_sampling
-
-            # x_mark_enc_mark_ori = x_mark_enc_mark_ori[:, ::self.configs.down_sampling_window, :]
-
-        x_enc = x_enc_sampling_list
-        # x_mark_enc = x_mark_sampling_list
-
-        return x_enc, None
+        self.denoise_layers_cond = nn.ModuleList([
+            DenoisingConditionDecoder(
+                embed_dim=configs.d_model,
+                num_heads=configs.n_heads,
+                dropout=configs.dropout,
+            )
+            for _ in range(self.denoise_layers_num)
+        ])
 
     def pretrain(self, x,x_mask):
 
@@ -364,9 +508,29 @@ class Model(nn.Module):
         x_embedding = self.enc_embedding(
             x_patch
         )  # [batch_size * num_features, seq_len, d_model]
+
+
+
+
+
+
         x_embedding_bias = self.add_sos_token_and_drop_last(
             x_embedding
         )  # [batch_size * num_features, seq_len, d_model]
+
+        # --------------------------- 添加条件 begin
+        # 获取条件编码
+        # cond_encoded = self.conditional_encoding(x_embedding)  # [batch_size, 1, d_model]
+        # # 扩展条件编码以匹配批次和特征维度
+        # cond_encoded = cond_encoded.repeat_interleave(x_embedding.size(0) // cond_encoded.size(0),
+        #                                               dim=0)  # [batch_size * num_features, 1, d_model]
+        # cond_encoded = cond_encoded.expand(-1, x_embedding.size(1), -1)  # [batch_size * num_features, seq_len, d_model]
+        #
+        # # 将条件编码添加到嵌入中
+        # x_embedding_bias = x_embedding + cond_encoded  # 结合条件编码
+
+        # --------------------------- 添加条件 end
+
         x_embedding_bias = self.positional_encoding(x_embedding_bias)
         x_embedding_bias, _ = self.decomp_multi(x_embedding_bias)
 
@@ -375,14 +539,17 @@ class Model(nn.Module):
             is_mask=True,
         )  # [batch_size * num_features, seq_len, d_model]
 
+
+
+
         res_pred = []
-        for layer in self.denoise_layers:
+        for layer in self.denoise_layers_cond:
             x = self.channel_independence[0](x)  # [batch_size * num_features, input_len, 1]
             # Patch
             x_patch = self.patch(x)  # [batch_size * num_features, seq_len, patch_len]
 
             # item = x_out
-            x_patch, _ = self.decomp_multi(x_patch)
+            x_patch, default_trend = self.decomp_multi(x_patch)
 
             noise_x_patch, _, _ = self.diffusion(
                 x_patch
@@ -395,16 +562,27 @@ class Model(nn.Module):
             noise_x_embedding = self.positional_encoding(noise_x_embedding)
             # noise end --------------------------
             noise_x_embedding, _ = self.decomp_multi(noise_x_embedding)
-            x_out, _ = self.decomp_multi(x_out)
+            x_out, x_out_trend = self.decomp_multi(x_out)
+
+            # --------------------------- 添加条件 begin
+            # 获取条件编码
+            # cond_encoded = self.conditional_encoding_att(x_out_trend)  # [batch_size, 1, d_model]
+            cond_encoded = self.conditional_encoding(x_out_trend)  # [batch_size, 1, d_model]
+            # 扩展条件编码以匹配批次和特征维度
+            # cond_encoded = cond_encoded.repeat_interleave(x_out_trend.size(0) // cond_encoded.size(0),
+            #                                               dim=0)  # [batch_size * num_features, 1, d_model]
+            # cond_encoded = cond_encoded.expand(-1, x_out_trend.size(1), -1)  # [batch_size * num_features, seq_len, d_model]
+
+            # 将条件编码添加到嵌入中
+
+            # --------------------------- 添加条件 end
 
 
             # For Denoising Patch Decoder
             denoise_out = layer(
-                query=noise_x_embedding,
-                key=x_out,
-                value=x_out,
-                is_tgt_mask=True,
-                is_src_mask=True,
+                Noise_x=noise_x_embedding,
+                X=x_out,
+                cond=cond_encoded
             )  # [batch_size * num_features, seq_len, d_model]
 
 
@@ -447,6 +625,24 @@ class Model(nn.Module):
 
         # x = torch.fft.fft(x,dim=-2).imag
         x = self.enc_embedding(x)  # [batch_size * num_features, seq_len, d_model]
+
+
+        # --------------------------- 添加条件 begin
+        # 获取条件编码
+        # cond_encoded = self.conditional_encoding(x)  # [batch_size, 1, d_model]
+        # # 扩展条件编码以匹配批次和特征维度
+        # cond_encoded = cond_encoded.repeat_interleave(x.size(0) // cond_encoded.size(0),
+        #                                               dim=0)  # [batch_size * num_features, 1, d_model]
+        # cond_encoded = cond_encoded.expand(-1, x.size(1), -1)  # [batch_size * num_features, seq_len, d_model]
+        #
+        # # 将条件编码添加到嵌入中
+        # x = x + cond_encoded  # 结合条件编码
+
+        # --------------------------- 添加条件 end
+
+
+
+
         x = self.positional_encoding(x)  # [batch_size * num_features, seq_len, d_model]
 
         x, _ = self.decomp_multi(x)
@@ -597,6 +793,7 @@ def get_config():
     parser.add_argument("--down_sampling_method", type=str, default='avg', help="down_sampling_method")
     parser.add_argument('--down_sampling_window', type=int, default=1, help='down sampling window size')
     parser.add_argument('--down_sampling_layers', type=int, default=2, help='num of down sampling layers')
+    parser.add_argument('--denoise_layers_num', type=int, default=3, help='num of denoise_layers_num')
 
     parser.add_argument(
         "--real_scheduler", type=str, default="cosine", help="real_scheduler in diffusion"
