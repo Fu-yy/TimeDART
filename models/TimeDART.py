@@ -15,6 +15,9 @@ from layers.TimeDART_EncDec import (
 from layers.Embed import Patch, PatchEmbedding, PositionalEncoding
 from utils.augmentations import masked_data
 import torch.nn.functional as F
+import torch
+import torch.nn as nn
+
 
 class ComplexFrequencyCrossAttention(nn.Module):
     def __init__(self, embed_dim, num_heads, sparsity_threshold=0.01):
@@ -122,9 +125,6 @@ class FlattenHead(nn.Module):
         x = x.permute(0, 2, 1)  # (batch_size, pred_len, num_features)
         return x
 
-
-import torch
-import torch.nn as nn
 
 
 class TrendExtractorConv(nn.Module):
