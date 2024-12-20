@@ -14,6 +14,10 @@ from layers.TimeDART_EncDec import (
 )
 from layers.Embed import Patch, PatchEmbedding, PositionalEncoding
 from utils.augmentations import masked_data
+import torch.nn.functional as F
+import torch
+import torch.nn as nn
+
 
 class ComplexFrequencyCrossAttention(nn.Module):
     def __init__(self, embed_dim, num_heads, sparsity_threshold=0.01):
@@ -122,9 +126,6 @@ class FlattenHead(nn.Module):
         return x
 
 
-import torch
-import torch.nn as nn
-
 
 class TrendExtractorConv(nn.Module):
     def __init__(self, input_dim, d_model, kernel_size=3):
@@ -132,17 +133,17 @@ class TrendExtractorConv(nn.Module):
         self.conv = nn.Conv1d(in_channels=input_dim, out_channels=d_model, kernel_size=kernel_size,
                               padding=kernel_size // 2)
         self.activation = nn.ReLU()
-        self.pool = nn.AdaptiveAvgPool1d(1)  # 将每个特征图压缩为一个值
+        # self.pool = nn.AdaptiveAvgPool1d(1)  # 将每个特征图压缩为一个值
 
     def forward(self, x):
         # x: [batch_size, seq_len, input_dim]
         x = x.permute(0, 2, 1)  # [batch_size, input_dim, seq_len]
         x = self.conv(x)  # [batch_size, d_model, seq_len]
         x = self.activation(x)
-        x = self.pool(x)  # [batch_size, d_model, 1]
-        x = x.squeeze(-1)  # [batch_size, d_model]
-        trend = x.unsqueeze(1)  # [batch_size, 1, d_model]
-        return trend
+        # x = self.pool(x)  # [batch_size, d_model, 1]
+        # x = x.squeeze(-1)  # [batch_size, d_model]
+        # trend = x.unsqueeze(1)  # [batch_size, 1, d_model]
+        return x.permute(0, 2, 1).contiguous()
 
 
 class ConditionalEncoding(nn.Module):
@@ -161,6 +162,136 @@ class ConditionalEncoding(nn.Module):
         cond_encoded = self.condition_proj(trend)  # [batch_size, 1, d_model]
         cond_encoded = self.activation(cond_encoded)
         return cond_encoded
+
+
+class SeqAttention(nn.Module):
+    def __init__(self, target_dim, embed_dim, num_heads=1,dropout=0.1):
+        super(SeqAttention, self).__init__()
+        self.target_dim = target_dim
+        # self.num_lags = num_lags
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        # 线性变换用于查询、键、值
+        # self.query = nn.Linear(target_dim, embed_dim)
+        # self.key = nn.Linear(target_dim, embed_dim)
+        # self.value = nn.Linear(target_dim, embed_dim)
+        #
+        # # 多头注意力
+        # self.attention = nn.MultiheadAttention(embed_dim, num_heads, batch_first=True)
+        # self.fc = nn.Linear(embed_dim, target_dim)
+
+
+
+
+        # -----
+
+        # self.self_attention = nn.MultiheadAttention(
+        #     embed_dim=target_dim, num_heads=num_heads, dropout=dropout, batch_first=True
+        # )
+        self.norm1 = nn.LayerNorm(target_dim)
+        # self.encoder_attention = nn.MultiheadAttention(
+        #     embed_dim=target_dim, num_heads=num_heads, dropout=dropout, batch_first=True
+        # )
+        self.norm2 = nn.LayerNorm(target_dim)
+        self.ff = nn.Sequential(
+            nn.Linear(target_dim, embed_dim*2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(embed_dim*2, target_dim),
+        )
+        self.norm3 = nn.LayerNorm(target_dim)
+        self.dropout = nn.Dropout(dropout)
+
+
+    def compute_attention(self, q, k, v):
+        scores = torch.matmul(q, k) / torch.sqrt(torch.tensor(q.size(-1)))
+        attn_weights = F.softmax(scores, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+        output = torch.matmul(attn_weights, v)
+        return output, attn_weights
+
+    def forward(self,lags):
+        # lags: (batch_size, sub_seq_len, target_dim, num_lags)
+        batch_size, sub_seq_len, target_dim = lags.size()
+        # 重塑为 (batch_size, sub_seq_len * num_lags, target_dim)
+        # lags = lags.permute(0,1,3,2).contiguous()
+        # lags = torch.reshape(lags, (batch_size, sub_seq_len , target_dim))
+        query= lags
+        key = lags.permute(0,2,1).contiguous()
+        value = lags
+        # Self-attention
+        # attn_output, _ = self.self_attention(query, query, query, attn_mask=None)
+        attn_output,_ = self.compute_attention(query, key, value)
+
+        query = self.norm1(query + self.dropout(attn_output))
+
+        # # Encoder attention
+        # attn_output, _ = self.encoder_attention(query, key, value, attn_mask=None)
+        # query = self.norm2(query + self.dropout(attn_output))
+
+        # Feed-forward network
+        ff_output = self.ff(query)
+        output = self.norm3(query + self.dropout(ff_output))
+
+
+
+        # 重塑回 (batch_size, sub_seq_len, target_dim, num_lags)
+        # output = torch.reshape(output, (batch_size, sub_seq_len , num_lags, target_dim)).permute(0, 1, 3, 2)
+
+        return output
+
+
+class DenoisingConditionDecoder(nn.Module):
+    def __init__(self, embed_dim, num_heads=1,dropout=0.1):
+        super(DenoisingConditionDecoder, self).__init__()
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.norm2 = nn.LayerNorm(embed_dim)
+        self.ff = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim*2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(embed_dim*2, embed_dim),
+        )
+        self.dropout = nn.Dropout(dropout)
+        self.gate = nn.Linear(embed_dim * 2, embed_dim)
+        self.sigmoid = nn.Sigmoid()
+
+
+
+    def compute_attention(self, q, k, v):
+        scores = torch.matmul(q, k) / torch.sqrt(torch.tensor(q.size(-1)))
+        attn_weights = F.softmax(scores, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+        output = torch.matmul(attn_weights, v)
+        return output, attn_weights
+
+    def forward(self,Noise_x,X,cond):
+
+        # ------------------------------
+        # 融合 Q 和 cond
+        combined = torch.cat([Noise_x, cond], dim=-1)  # [batch_size, seq_len, embed_dim * 2]
+        gate = self.sigmoid(self.gate(combined))  # [batch_size, seq_len, embed_dim]
+        fused = gate * Noise_x + (1 - gate) * cond  # 融合后的表示
+        # ------------------------------
+
+
+        query= fused
+        key = X.permute(0,2,1).contiguous()
+        value = X
+        attn_output,_ = self.compute_attention(query, key, value)
+
+        query = self.norm1(query + self.dropout(attn_output))
+
+        # Feed-forward network
+        ff_output = self.ff(query)
+        output = self.norm2(query + self.dropout(ff_output))
+        return output
+
+
+
+
 
 
 class Model(nn.Module):
@@ -239,6 +370,13 @@ class Model(nn.Module):
             input_dim=self.d_model,
             d_model=self.d_model
         )
+        # 在 Model 类中替换 ConditionalEncoding
+        # self.conditional_encoding_att = SeqAttention(
+        #     target_dim=self.d_model,
+        #     num_heads=self.num_heads,
+        #     embed_dim=self.d_model,
+        #     dropout=self.dropout,
+        # )
         # Decoder
         if self.task_name == "pretrain":
             self.denoising_patch_decoder = DenoisingPatchDecoder(
@@ -265,7 +403,14 @@ class Model(nn.Module):
                     for i in range(configs.down_sampling_layers + 1)
                 ]
             )
-
+            self.regression = nn.ModuleList([
+                nn.Linear(self.input_len // (configs.down_sampling_window ** i), self.input_len)
+                for i in range(configs.down_sampling_layers + 1)
+            ])
+            self.regression = nn.ModuleList([
+                nn.Linear(self.input_len, self.input_len)
+                for i in range(configs.down_sampling_layers + 1)
+            ])
 
 
 
@@ -288,6 +433,11 @@ class Model(nn.Module):
                 ]
             )
 
+            # self.regression = nn.Linear(self.input_len, configs.pred_len)
+            self.regression = nn.ModuleList([
+                nn.Linear(self.input_len // (configs.down_sampling_window ** i), configs.pred_len)
+                for i in range(configs.down_sampling_layers + 1)
+            ])
 
             self.head = FlattenHead(
                     seq_len=self.seq_len,
@@ -297,8 +447,10 @@ class Model(nn.Module):
                 )
 
 
-        self.regression =nn.Linear(self.input_len, configs.pred_len)
-
+            self.regression = nn.ModuleList([
+                nn.Linear(self.input_len, configs.pred_len)
+                for i in range(configs.down_sampling_layers + 1)
+            ])
 
 
         self.merge_linear = nn.Linear(self.d_model * 2, self.d_model)
@@ -315,8 +467,14 @@ class Model(nn.Module):
             for _ in range(self.denoise_layers_num)
         ])
 
-
-
+        self.denoise_layers_cond = nn.ModuleList([
+            DenoisingConditionDecoder(
+                embed_dim=configs.d_model,
+                num_heads=configs.n_heads,
+                dropout=configs.dropout,
+            )
+            for _ in range(self.denoise_layers_num)
+        ])
 
     def pretrain(self, x,x_mask):
 
@@ -381,65 +539,57 @@ class Model(nn.Module):
             is_mask=True,
         )  # [batch_size * num_features, seq_len, d_model]
 
+        x_patch, default_trend = self.decomp_multi(x_patch)
+        noise_x_patch, _, _ = self.diffusion(
+            x_patch
+        )  # [batch_size * num_features, seq_len, patch_len]
 
 
+        noise_x_embedding = self.enc_embedding(
+            noise_x_patch
+        )  # [batch_size * num_features, seq_len, d_model]
+        noise_x_embedding = self.positional_encoding(noise_x_embedding)
 
-        res_pred = []
-        for layer in self.denoise_layers:
-            x = self.channel_independence[0](x)  # [batch_size * num_features, input_len, 1]
-            # Patch
-            x_patch = self.patch(x)  # [batch_size * num_features, seq_len, patch_len]
-
-            # item = x_out
-            x_patch, _ = self.decomp_multi(x_patch)
-
-            noise_x_patch, _, _ = self.diffusion(
-                x_patch
-            )  # [batch_size * num_features, seq_len, patch_len]
-
-
-            noise_x_embedding = self.enc_embedding(
-                noise_x_patch
-            )  # [batch_size * num_features, seq_len, d_model]
-            noise_x_embedding = self.positional_encoding(noise_x_embedding)
+        res_pred = 0
+        for layer in self.denoise_layers_cond:
             # noise end --------------------------
             noise_x_embedding, _ = self.decomp_multi(noise_x_embedding)
-            x_out, _ = self.decomp_multi(x_out)
+            x_out, x_out_trend = self.decomp_multi(x_out)
 
             # --------------------------- 添加条件 begin
             # 获取条件编码
-            cond_encoded = self.conditional_encoding(x_out)  # [batch_size, 1, d_model]
+            # cond_encoded = self.conditional_encoding_att(x_out_trend)  # [batch_size, 1, d_model]
+            cond_encoded = self.conditional_encoding(x_out_trend)  # [batch_size, 1, d_model]
             # 扩展条件编码以匹配批次和特征维度
-            cond_encoded = cond_encoded.repeat_interleave(x_out.size(0) // cond_encoded.size(0),
-                                                          dim=0)  # [batch_size * num_features, 1, d_model]
-            cond_encoded = cond_encoded.expand(-1, x_out.size(1), -1)  # [batch_size * num_features, seq_len, d_model]
+            # cond_encoded = cond_encoded.repeat_interleave(x_out_trend.size(0) // cond_encoded.size(0),
+            #                                               dim=0)  # [batch_size * num_features, 1, d_model]
+            # cond_encoded = cond_encoded.expand(-1, x_out_trend.size(1), -1)  # [batch_size * num_features, seq_len, d_model]
 
             # 将条件编码添加到嵌入中
-            x_out = x_out + cond_encoded  # 结合条件编码
 
             # --------------------------- 添加条件 end
 
 
             # For Denoising Patch Decoder
             denoise_out = layer(
-                query=noise_x_embedding,
-                key=x_out,
-                value=x_out,
-                is_tgt_mask=True,
-                is_src_mask=True,
+                Noise_x=noise_x_embedding,
+                X=x_out,
+                cond=cond_encoded
             )  # [batch_size * num_features, seq_len, d_model]
+            noise_x_embedding = denoise_out
+            res_pred = res_pred + denoise_out
+
+        denoise_out = res_pred
+        denoise_out = denoise_out.reshape(
+            batch_size, num_features, -1, self.d_model
+        )  # [batch_size, num_features, seq_len, d_model]
+
+        denoise_out = self.projection[0](denoise_out)  # [batch_size, input_len, num_features]
+        # x = denoise_out
 
 
-
-            denoise_out = denoise_out.reshape(
-                batch_size, num_features, -1, self.d_model
-            )  # [batch_size, num_features, seq_len, d_model]
-            denoise_out = self.projection[0](denoise_out)  # [batch_size, input_len, num_features]
-            x = denoise_out
-
-
-            predict_x = denoise_out + self.regression(trend.permute(0,2,1)).permute(0,2,1).contiguous()
-            # res_pred.append(predict_x)
+        predict_x = denoise_out + self.regression[0](trend.permute(0,2,1)).permute(0,2,1).contiguous()
+        # res_pred.append(predict_x)
 
         # Instance Denormalization
         predict_x = predict_x * (stdevs[:, 0, :].unsqueeze(1)).repeat(

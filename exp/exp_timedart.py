@@ -129,7 +129,7 @@ class Exp_TimeDART(Exp_Basic):
 
                 self.encoder_state_dict = OrderedDict()
                 for k, v in self.model.state_dict().items():
-                    if "encoder" in k or "enc_embedding" in k or "regression" in k :
+                    if "encoder" in k or "enc_embedding" in k  :
                         if "module." in k:
                             k = k.replace("module.", "")  # multi-gpu
                         self.encoder_state_dict[k] = v
@@ -144,7 +144,7 @@ class Exp_TimeDART(Exp_Basic):
 
                 self.encoder_state_dict = OrderedDict()
                 for k, v in self.model.state_dict().items():
-                    if "encoder" in k or "enc_embedding" in k or "regression" in k:
+                    if "encoder" in k or "enc_embedding" in k:
                         if "module." in k:
                             k = k.replace("module.", "")
                         self.encoder_state_dict[k] = v
