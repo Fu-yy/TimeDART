@@ -15,6 +15,11 @@ downloads/
 eggs/
 .eggs/
 lib/
+run_log/
+.idea
+.idea/
+outputs/
+checkpoints/
 lib64/
 parts/
 sdist/
@@ -22,6 +27,7 @@ var/
 datasets/
 dataset/
 wheels/
+outputs
 pip-wheel-metadata/
 share/python-wheels/
 *.egg-info/
