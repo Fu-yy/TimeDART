@@ -203,6 +203,7 @@ parser.add_argument('--masked_rule', type=str, default='geometric',
 parser.add_argument('--mask_rate', type=float, default=0.5, help='mask ratio')
 parser.add_argument('--seq_len', type=int, default=96, help='seq_len')
 parser.add_argument('--denoise_layers_num', type=int, default=3, help='denoise_layers_num')
+parser.add_argument('--inverse', action='store_true', help='inverse output data', default=False)
 
 args = parser.parse_args()
 args.use_gpu = True if torch.cuda.is_available() and args.use_gpu else False

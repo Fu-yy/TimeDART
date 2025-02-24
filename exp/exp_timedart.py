@@ -5,8 +5,11 @@ from utils.tools import (
     adjust_learning_rate,
     transfer_weights,
     show_series,
-    show_matrix,
+    show_matrix, visual,
 )
+import matplotlib.pyplot as plt
+plt.switch_backend('agg')
+
 from utils.augmentations import masked_data
 from utils.metrics import metric
 from torch.optim import lr_scheduler
@@ -402,6 +405,14 @@ class Exp_TimeDART(Exp_Basic):
 
                 preds.append(pred)
                 trues.append(true)
+                if i % 20 == 0:
+                    input = batch_x.detach().cpu().numpy()
+                    if test_data.scale and self.args.inverse:
+                        shape = input.shape
+                        input = test_data.inverse_transform(input.reshape(shape[0] * shape[1], -1)).reshape(shape)
+                    gt = np.concatenate((input[0, :, -1], true[0, :, -1]), axis=0)
+                    pd = np.concatenate((input[0, :, -1], pred[0, :, -1]), axis=0)
+                    visual(gt, pd, os.path.join(folder_path, str(i) + '.png'))
 
         # preds = np.array(preds)
         # trues = np.array(trues)
@@ -410,7 +421,7 @@ class Exp_TimeDART(Exp_Basic):
         preds = preds.reshape(-1, preds.shape[-2], preds.shape[-1])
         trues = trues.reshape(-1, trues.shape[-2], trues.shape[-1])
 
-        mae, mse, _, _, _ = metric(preds, trues)
+        mae, mse, rmse, mape, mspe = metric(preds, trues)
         print(
             "{0}->{1}, mse:{2:.3f}, mae:{3:.3f}".format(
                 self.args.input_len, self.args.pred_len, mse, mae
@@ -423,3 +434,7 @@ class Exp_TimeDART(Exp_Basic):
             )
         )
         f.close()
+        np.save(folder_path+os.sep + 'metrics.npy', np.array([mae, mse, rmse, mape, mspe]))
+        np.save(folder_path+os.sep + 'pred.npy', preds)
+        np.save(folder_path +os.sep+ 'true.npy', trues)
+        return

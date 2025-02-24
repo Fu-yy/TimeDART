@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from einops import rearrange, repeat
+import pandas as pd
 
 from layers.Autoformer_EncDec import moving_avg, series_decomp
 from layers.Transformer_EncDec import Decoder, DecoderLayer, Encoder, EncoderLayer
@@ -277,6 +278,8 @@ class DenoisingConditionDecoder(nn.Module):
         # ------------------------------
 
 
+        A,B,C,D = Noise_x[0, :, 0], cond[0, :, 0],fused[0,:,0], X[0, :, 0]
+
         query= fused
         key = X.permute(0,2,1).contiguous()
         value = X
@@ -287,6 +290,13 @@ class DenoisingConditionDecoder(nn.Module):
         # Feed-forward network
         ff_output = self.ff(query)
         output = self.norm2(query + self.dropout(ff_output))
+
+
+        res0 = torch.stack((A, B,C, D,output[0,:,0]), dim=-1)
+        df0 = pd.DataFrame(res0.cpu().detach().numpy())  # 先转移到CPU
+        df0.to_excel('output2.xlsx', index=False, header=False)
+
+
         return output
 
 
@@ -485,6 +495,7 @@ class Model(nn.Module):
         mask_rate = 0.5
         lm=3
         positive_nums=1
+        e_x =x
         batch_size, input_len, num_features = x.size()
         means = torch.mean(
             x, dim=1, keepdim=True
@@ -495,20 +506,31 @@ class Model(nn.Module):
         ).detach()  # [batch_size, 1, num_features]
         x = x / stdevs  # [batch_size, input_len, num_features]
 
-
         x, trend = self.decomp_multi(x)
+        # res0 = torch.stack((e_x[0,:,0],x[0,:,0],trend[0,:,0]),dim=-1)
+        # df0 = pd.DataFrame(res0.cpu().numpy())  # 先转移到CPU
+        # df0.to_excel('output0.xlsx', index=False, header=False)
+        # res1 = torch.stack((e_x[1,:,0],x[1,:,0],trend[1,:,0]),dim=-1)
+        # df1 = pd.DataFrame(res1.cpu().numpy())  # 先转移到CPU
+        # df1.to_excel('output1.xlsx', index=False, header=False)
+        # res2 = torch.stack((e_x[2,:,0],x[2,:,0],trend[2,:,0]),dim=-1)
+        # df2 = pd.DataFrame(res2.cpu().numpy())  # 先转移到CPU
+        # df2.to_excel('output3.xlsx', index=False, header=False)
+        # res3 = torch.stack((e_x[3,:,0],x[3,:,0],trend[3,:,0]),dim=-1)
+        # df3 = pd.DataFrame(res3.cpu().numpy())  # 先转移到CPU
+        # df3.to_excel('output4.xlsx', index=False, header=False)
+
+        # x, trend = x,x
         # Channel Independence
         x = self.channel_independence[0](x)  # [batch_size * num_features, input_len, 1]
         # Patch
         x_patch = self.patch(x)  # [batch_size * num_features, seq_len, patch_len]
-        # x_patch, trend = self.decomp_multi(x_patch)
         # x_patch_f = torch.fft.fft(x_patch,dim=-2).imag
 
         # For Casual Transformer
         x_embedding = self.enc_embedding(
             x_patch
         )  # [batch_size * num_features, seq_len, d_model]
-
 
 
 
@@ -532,13 +554,16 @@ class Model(nn.Module):
         # --------------------------- 添加条件 end
 
         x_embedding_bias = self.positional_encoding(x_embedding_bias)
+
+
+
         x_embedding_bias, _ = self.decomp_multi(x_embedding_bias)
+        # x_embedding_bias, _ = x_embedding_bias,x_embedding_bias
 
         x_out = self.encoder(
             x_embedding_bias,
             is_mask=True,
         )  # [batch_size * num_features, seq_len, d_model]
-
 
 
 
@@ -550,6 +575,7 @@ class Model(nn.Module):
 
             # item = x_out
             x_patch, default_trend = self.decomp_multi(x_patch)
+            # x_patch, default_trend = x_patch,x_patch
 
             noise_x_patch, _, _ = self.diffusion(
                 x_patch
@@ -560,9 +586,15 @@ class Model(nn.Module):
                 noise_x_patch
             )  # [batch_size * num_features, seq_len, d_model]
             noise_x_embedding = self.positional_encoding(noise_x_embedding)
+            noise_x_embedding_res = noise_x_embedding
             # noise end --------------------------
             noise_x_embedding, _ = self.decomp_multi(noise_x_embedding)
+
+
+
+            # noise_x_embedding, _ = noise_x_embedding,noise_x_embedding
             x_out, x_out_trend = self.decomp_multi(x_out)
+            # x_out, x_out_trend = x_out,x_out
 
             # --------------------------- 添加条件 begin
             # 获取条件编码
@@ -620,6 +652,7 @@ class Model(nn.Module):
         ).detach()
         x = x / stdevs
         x, trend = self.decomp_multi(x)
+        # x, trend = x,x
         x = self.channel_independence[0](x)  # [batch_size * num_features, input_len, 1]
         x = self.patch(x)  # [batch_size * num_features, seq_len, patch_len]
 
@@ -646,6 +679,7 @@ class Model(nn.Module):
         x = self.positional_encoding(x)  # [batch_size * num_features, seq_len, d_model]
 
         x, _ = self.decomp_multi(x)
+        # x, _ = x,x
 
         x = self.encoder(
             x,
