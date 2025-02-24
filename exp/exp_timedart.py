@@ -75,6 +75,7 @@ class Exp_TimeDART(Exp_Basic):
         vali_data, vali_loader = self._get_data(flag="val")
 
         path = os.path.join(self.args.pretrain_checkpoints, self.args.data)
+        path = path + '_dln_' + str(self.args.denoise_layers_num)
         if not os.path.exists(path):
             os.makedirs(path)
 
@@ -243,6 +244,7 @@ class Exp_TimeDART(Exp_Basic):
         test_data, test_loader = self._get_data(flag="test")
 
         path = os.path.join(self.args.checkpoints, setting)
+        path = path + '_dln_' + str(self.args.denoise_layers_num)
         if not os.path.exists(path):
             os.makedirs(path)
 
@@ -380,6 +382,7 @@ class Exp_TimeDART(Exp_Basic):
         trues = []
 
         folder_path = "./outputs/test_results/{}".format(self.args.data)
+        folder_path = folder_path + '_dln_' + str(self.args.denoise_layers_num)
         if not os.path.exists(folder_path):
             os.makedirs(folder_path)
 
@@ -434,7 +437,7 @@ class Exp_TimeDART(Exp_Basic):
             )
         )
         f.close()
-        np.save(folder_path+os.sep + 'metrics.npy', np.array([mae, mse, rmse, mape, mspe]))
-        np.save(folder_path+os.sep + 'pred.npy', preds)
-        np.save(folder_path +os.sep+ 'true.npy', trues)
+        np.save(folder_path+os.sep+'layer_nums='+os.sep + str(self.args.denoise_layers_num)+ os.sep + 'metrics.npy', np.array([mae, mse, rmse, mape, mspe]))
+        np.save(folder_path+os.sep+'layer_nums='+os.sep + str(self.args.denoise_layers_num)+ os.sep + 'pred.npy', preds)
+        np.save(folder_path +os.sep+'layer_nums='+os.sep + str(self.args.denoise_layers_num)+ os.sep+ 'true.npy', trues)
         return
