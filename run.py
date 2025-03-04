@@ -287,7 +287,7 @@ elif args.task_name == "finetune":
         )
 
         args.load_checkpoints = os.path.join(
-            args.pretrain_checkpoints, args.data, args.transfer_checkpoints
+            args.pretrain_checkpoints, args.data + '_dln_' + str(args.denoise_layers_num), args.transfer_checkpoints
         )
 
         exp = Exp(args)  # set experiments

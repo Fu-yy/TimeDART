@@ -21,7 +21,8 @@ import time
 import warnings
 import numpy as np
 from collections import OrderedDict
-from tensorboardX import SummaryWriter
+# from tensorboardX import SummaryWriter
+from torch.utils.tensorboard import SummaryWriter
 import random
 from tqdm import tqdm
 
@@ -437,7 +438,7 @@ class Exp_TimeDART(Exp_Basic):
             )
         )
         f.close()
-        np.save(folder_path+os.sep+'layer_nums='+os.sep + str(self.args.denoise_layers_num)+ os.sep + 'metrics.npy', np.array([mae, mse, rmse, mape, mspe]))
-        np.save(folder_path+os.sep+'layer_nums='+os.sep + str(self.args.denoise_layers_num)+ os.sep + 'pred.npy', preds)
-        np.save(folder_path +os.sep+'layer_nums='+os.sep + str(self.args.denoise_layers_num)+ os.sep+ 'true.npy', trues)
+        np.save(folder_path+os.sep+ 'metrics.npy', np.array([mae, mse, rmse, mape, mspe]))
+        np.save(folder_path+os.sep+'pred.npy', preds)
+        np.save(folder_path +os.sep+'true.npy', trues)
         return
