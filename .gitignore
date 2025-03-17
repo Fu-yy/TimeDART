@@ -18,7 +18,6 @@ lib/
 run_log/
 .idea
 .idea/
-outputs/
 checkpoints/
 lib64/
 parts/
@@ -144,3 +143,5 @@ dmypy.json
 
 /outputs/
 /outputs
+outputs/
+trend_figs/
