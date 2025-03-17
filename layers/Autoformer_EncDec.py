@@ -1,6 +1,60 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch
+from torch import nn
+
+
+class EMA(nn.Module):
+    """
+    Exponential Moving Average (EMA) block to highlight the trend of time series
+    """
+
+    def __init__(self, alpha,input_size):
+        super(EMA, self).__init__()
+        # self.alpha = nn.Parameter(torch.tensor(alpha))    # Learnable alpha
+        self.alpha = alpha
+        self.fusion = nn.Linear(input_size,input_size)  # 自适应权重融合
+
+    # Optimized implementation with O(1) time complexity
+    def forward(self, x):
+        # x: [Batch, Input, Channel]
+        # self.alpha.data.clamp_(0, 1)        # Clamp learnable alpha to [0, 1]
+        _, t, _ = x.shape
+        x_fus = self.fusion(x.permute(0,2,1)).permute(0,2,1)
+        powers = torch.flip(torch.arange(t, dtype=torch.double), dims=(0,)).to('cuda')
+        weights = torch.pow((1 - self.alpha), powers).to('cuda')
+        divisor = weights.clone()
+        weights[1:] = weights[1:] * self.alpha
+        weights = weights.reshape(1, t, 1)
+        divisor = divisor.reshape(1, t, 1)
+        x_fus = torch.cumsum(x_fus * weights, dim=1)
+        x_fus = torch.div(x_fus, divisor)
+        return x_fus.to(torch.float32)
+
+    # # Naive implementation with O(n) time complexity
+    # def forward(self, x):
+    #     # self.alpha.data.clamp_(0, 1)        # Clamp learnable alpha to [0, 1]
+    #     s = x[:, 0, :]
+    #     res = [s.unsqueeze(1)]
+    #     for t in range(1, x.shape[1]):
+    #         xt = x[:, t, :]
+    #         s = self.alpha * xt + (1 - self.alpha) * s
+    #         res.append(s.unsqueeze(1))
+    #     return torch.cat(res, dim=1)
+
+class EMA_Learnable(nn.Module):
+    """
+    Series decomposition block
+    """
+    def __init__(self, ma_type,input_size, alpha, beta):
+        super(EMA_Learnable, self).__init__()
+
+        self.ma = EMA(alpha,input_size=input_size)
+    def forward(self, x):
+        moving_average = self.ma(x)
+        res = x - moving_average
+        return res, moving_average
 
 
 class my_Layernorm(nn.Module):

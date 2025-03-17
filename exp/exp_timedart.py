@@ -21,8 +21,8 @@ import time
 import warnings
 import numpy as np
 from collections import OrderedDict
-# from tensorboardX import SummaryWriter
-from torch.utils.tensorboard import SummaryWriter
+from tensorboardX import SummaryWriter
+# from torch.utils.tensorboard import SummaryWriter
 import random
 from tqdm import tqdm
 
@@ -134,7 +134,7 @@ class Exp_TimeDART(Exp_Basic):
 
                 self.encoder_state_dict = OrderedDict()
                 for k, v in self.model.state_dict().items():
-                    if "encoder" in k or "enc_embedding" in k or "conditional_encoding" in k:
+                    if "encoder" in k or "enc_embedding" in k or "decomp_multi" in k or "decomp_multi_patch" in k:
                         if "module." in k:
                             k = k.replace("module.", "")  # multi-gpu
                         self.encoder_state_dict[k] = v
@@ -149,7 +149,7 @@ class Exp_TimeDART(Exp_Basic):
 
                 self.encoder_state_dict = OrderedDict()
                 for k, v in self.model.state_dict().items():
-                    if "encoder" in k or "enc_embedding" in k or "conditional_encoding" in k:
+                    if "encoder" in k or "enc_embedding" in k or "decomp_multi" in k or "decomp_multi_patch" in k:
                         if "module." in k:
                             k = k.replace("module.", "")
                         self.encoder_state_dict[k] = v
@@ -188,7 +188,7 @@ class Exp_TimeDART(Exp_Basic):
                 # diff_loss.requires_grad = True
             # diff_loss = model_criterion(pred_x, batch_x)
             else:
-                pred_x = self.model(batch_x,batch_x_m)
+                pred_x = self.model(batch_x,batch_x_m,i)
                 # diff_loss = self.model(batch_x)
                 diff_loss = model_criterion(pred_x, batch_x)
             # diff_loss.requires_grad = True
@@ -416,7 +416,10 @@ class Exp_TimeDART(Exp_Basic):
                         input = test_data.inverse_transform(input.reshape(shape[0] * shape[1], -1)).reshape(shape)
                     gt = np.concatenate((input[0, :, -1], true[0, :, -1]), axis=0)
                     pd = np.concatenate((input[0, :, -1], pred[0, :, -1]), axis=0)
-                    visual(gt, pd, os.path.join(folder_path, str(i) + '.png'))
+                    fig_path = folder_path + os.sep + 'figs'
+                    if not os.path.exists(fig_path):
+                        os.makedirs(fig_path)
+                    visual(gt, pd, os.path.join(fig_path, str(i) + '.png'))
 
         # preds = np.array(preds)
         # trues = np.array(trues)

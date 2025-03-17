@@ -17,90 +17,41 @@ from layers.Embed import Patch, PatchEmbedding, PositionalEncoding
 from utils.augmentations import masked_data
 import torch.nn.functional as F
 import torch
+import os
 import torch.nn as nn
 
+import matplotlib.pyplot as plt
 
-class ComplexFrequencyCrossAttention(nn.Module):
-    def __init__(self, embed_dim, num_heads, sparsity_threshold=0.01):
-        """
-        Args:
-            embed_dim: 输入特征维度（频域嵌入维度）。
-            num_heads: 注意力头数。
-            sparsity_threshold: 稀疏化阈值，用于过滤无关频率分量。
-        """
-        super(ComplexFrequencyCrossAttention, self).__init__()
-        self.embed_dim = embed_dim
-        self.num_heads = num_heads
-        self.sparsity_threshold = sparsity_threshold
 
-        # Query, Key, Value 分别对两个输入进行计算
-        self.real_q_proj = nn.Linear(embed_dim, embed_dim)
-        self.real_k_proj = nn.Linear(embed_dim, embed_dim)
-        self.real_v_proj = nn.Linear(embed_dim, embed_dim)
+def plot_tensors(tensor_list,file_name,index):
+    project_path = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
+    fig_path = project_path + os.sep + 'trend_figs'
+    if not os.path.exists(fig_path):
+        os.makedirs(fig_path)
+    plt.figure(figsize=(10, 6))  # 设置画布大小
 
-        self.imag_q_proj = nn.Linear(embed_dim, embed_dim)
-        self.imag_k_proj = nn.Linear(embed_dim, embed_dim)
-        self.imag_v_proj = nn.Linear(embed_dim, embed_dim)
+    # 遍历每个tensor并绘制
+    for i, tensor in enumerate(tensor_list):
+        # 将tensor转换为numpy数组（自动处理GPU/CPU设备）
+        data = tensor.cpu().detach().numpy()  # 兼容PyTorch张量
+        # 如果是其他框架如TensorFlow，使用 data = tensor.numpy()
 
-        # 输出投影
-        self.out_proj_real = nn.Linear(embed_dim, embed_dim)
-        self.out_proj_imag = nn.Linear(embed_dim, embed_dim)
+        plt.plot(data[0,:,-1],
+                 label=f'Tensor {i + 1}',  # 自动生成图例标签
+                 linestyle='-',  # 实线连接
+                 alpha=0.7)  # 半透明效果
 
-        # 缩放因子
-        self.scale = (embed_dim // num_heads) ** -0.5
+    # 添加图表元素
+    plt.title('Tensor Line Plots', fontsize=14)
+    plt.xlabel('Index', fontsize=12)
+    plt.ylabel('Value', fontsize=12)
+    plt.grid(True, linestyle='--', alpha=0.5)  # 网格线
+    plt.legend()  # 显示图例
 
-    def forward(self, x1, x2):
-        """
-        Args:
-            x1: [B, T, D] - 输入 1 的时域数据 (Batch, Time, Dimension)
-            x2: [B, T, D] - 输入 2 的时域数据 (Batch, Time, Dimension)
-        Returns:
-            输出经过频域交叉注意力的张量 [B, T, D]
-        """
-        B, T, D = x1.shape
+    # 自动调整布局并显示
+    plt.tight_layout()
+    plt.savefig( fig_path + os.sep + file_name + '_' +str(index)  +'_figure.png')
 
-        # 转换到频域
-        freq_x1 = torch.fft.rfft(x1, dim=1, norm='ortho')  # [B, F, D]
-        freq_x2 = torch.fft.rfft(x2, dim=1, norm='ortho')  # [B, F, D]
-        F = freq_x1.shape[1]  # 频域分量数
-
-        # 分离实部和虚部
-        real_x1, imag_x1 = freq_x1.real, freq_x1.imag  # [B, F, D]
-        real_x2, imag_x2 = freq_x2.real, freq_x2.imag  # [B, F, D]
-
-        # 分别计算 Query, Key, Value
-        real_Q = self.real_q_proj(real_x1)  # [B, F, D]
-        real_K = self.real_k_proj(real_x2)  # [B, F, D]
-        real_V = self.real_v_proj(real_x2)  # [B, F, D]
-
-        imag_Q = self.imag_q_proj(imag_x1)  # [B, F, D]
-        imag_K = self.imag_k_proj(imag_x2)  # [B, F, D]
-        imag_V = self.imag_v_proj(imag_x2)  # [B, F, D]
-
-        # 实部和虚部的注意力权重计算
-        attn_real = torch.matmul(real_Q, real_K.transpose(-2, -1)) * self.scale  # [B, F, F]
-        attn_imag = torch.matmul(imag_Q, imag_K.transpose(-2, -1)) * self.scale  # [B, F, F]
-
-        # 合并注意力权重并稀疏化
-        attn_weights = attn_real + attn_imag  # [B, F, F]
-        attn_weights = torch.softmax(attn_weights, dim=-1)
-        attn_weights = torch.where(attn_weights > self.sparsity_threshold, attn_weights, torch.zeros_like(attn_weights))
-
-        # 实部和虚部的加权值计算
-        out_real = torch.matmul(attn_weights, real_V)  # [B, F, D]
-        out_imag = torch.matmul(attn_weights, imag_V)  # [B, F, D]
-
-        # 输出投影
-        out_real = self.out_proj_real(out_real)  # [B, F, D]
-        out_imag = self.out_proj_imag(out_imag)  # [B, F, D]
-
-        # 合并实部和虚部为复数
-        freq_out = torch.complex(out_real, out_imag)
-
-        # 转换回时域
-        time_out = torch.fft.irfft(freq_out, n=T, dim=1, norm='ortho')  # [B, T, D]
-
-        return time_out
 class FlattenHead(nn.Module):
     def __init__(
         self,
@@ -292,9 +243,9 @@ class DenoisingConditionDecoder(nn.Module):
         output = self.norm2(query + self.dropout(ff_output))
 
 
-        res0 = torch.stack((A, B,C, D,output[0,:,0]), dim=-1)
-        df0 = pd.DataFrame(res0.cpu().detach().numpy())  # 先转移到CPU
-        df0.to_excel('output2.xlsx', index=False, header=False)
+        # res0 = torch.stack((A, B,C, D,output[0,:,0]), dim=-1)
+        # df0 = pd.DataFrame(res0.cpu().detach().numpy())  # 先转移到CPU
+        # df0.to_excel('output2.xlsx', index=False, header=False)
 
 
         return output
@@ -398,11 +349,6 @@ class Model(nn.Module):
             )
 
 
-            self.denoising_patch_decoder_frequency = ComplexFrequencyCrossAttention(
-                embed_dim=configs.d_model, num_heads=configs.n_heads
-            )
-
-
             self.projection = nn.ModuleList(
                 [FlattenHead(
                 seq_len=self.seq_len // (configs.down_sampling_window ** i),
@@ -463,7 +409,6 @@ class Model(nn.Module):
             ])
 
 
-        self.merge_linear = nn.Linear(self.d_model * 2, self.d_model)
         self.decomp_multi = series_decomp(95)
         self.denoise_layers_num = configs.denoise_layers_num
         self.denoise_layers = nn.ModuleList([
@@ -486,7 +431,7 @@ class Model(nn.Module):
             for _ in range(self.denoise_layers_num)
         ])
 
-    def pretrain(self, x,x_mask):
+    def pretrain(self, x,x_mask,i=0):
 
         # [batch_size, input_len, num_features]
         # Instance Normalization
@@ -540,18 +485,6 @@ class Model(nn.Module):
             x_embedding
         )  # [batch_size * num_features, seq_len, d_model]
 
-        # --------------------------- 添加条件 begin
-        # 获取条件编码
-        # cond_encoded = self.conditional_encoding(x_embedding)  # [batch_size, 1, d_model]
-        # # 扩展条件编码以匹配批次和特征维度
-        # cond_encoded = cond_encoded.repeat_interleave(x_embedding.size(0) // cond_encoded.size(0),
-        #                                               dim=0)  # [batch_size * num_features, 1, d_model]
-        # cond_encoded = cond_encoded.expand(-1, x_embedding.size(1), -1)  # [batch_size * num_features, seq_len, d_model]
-        #
-        # # 将条件编码添加到嵌入中
-        # x_embedding_bias = x_embedding + cond_encoded  # 结合条件编码
-
-        # --------------------------- 添加条件 end
 
         x_embedding_bias = self.positional_encoding(x_embedding_bias)
 
@@ -574,7 +507,7 @@ class Model(nn.Module):
             x_patch = self.patch(x)  # [batch_size * num_features, seq_len, patch_len]
 
             # item = x_out
-            x_patch, default_trend = self.decomp_multi(x_patch)
+            x_patch, default_trend1 = self.decomp_multi(x_patch)
             # x_patch, default_trend = x_patch,x_patch
 
             noise_x_patch, _, _ = self.diffusion(
@@ -588,7 +521,7 @@ class Model(nn.Module):
             noise_x_embedding = self.positional_encoding(noise_x_embedding)
             noise_x_embedding_res = noise_x_embedding
             # noise end --------------------------
-            noise_x_embedding, _ = self.decomp_multi(noise_x_embedding)
+            noise_x_embedding, default_trend2 = self.decomp_multi(noise_x_embedding)
 
 
 
@@ -617,8 +550,8 @@ class Model(nn.Module):
                 cond=cond_encoded
             )  # [batch_size * num_features, seq_len, d_model]
 
-
-
+            # default_trend2_reg = self.trend2_regression(default_trend2.permute(0,2,1)).permute(0,2,1)
+            # denoise_out = denoise_out + default_trend2_reg
             denoise_out = denoise_out.reshape(
                 batch_size, num_features, -1, self.d_model
             )  # [batch_size, num_features, seq_len, d_model]
@@ -627,7 +560,15 @@ class Model(nn.Module):
 
 
             predict_x = denoise_out + self.regression[0](trend.permute(0,2,1)).permute(0,2,1).contiguous()
+            # predict_x = denoise_out
             # res_pred.append(predict_x)
+        # predict_x = predict_x + self.regression[0](trend.permute(0,2,1)).permute(0,2,1).contiguous()
+        # if i % 20 == 0:
+        #     no_trend = [default_trend1,default_trend2,x_patch,noise_x_embedding]
+        #     plot_tensors(no_trend,'notrend',i)
+        #     trend_list = [default_trend1,default_trend2,x_patch,noise_x_embedding,trend]
+        #     plot_tensors(trend_list,'withtrend',i)
+
 
         # Instance Denormalization
         predict_x = predict_x * (stdevs[:, 0, :].unsqueeze(1)).repeat(
@@ -700,10 +641,10 @@ class Model(nn.Module):
 
         return x
 
-    def forward(self, batch_x,x_mask):
+    def forward(self, batch_x,x_mask,i=0):
 
         if self.task_name == "pretrain":
-            return self.pretrain(batch_x,x_mask)
+            return self.pretrain(batch_x,x_mask,i)
         elif self.task_name == "finetune":
             dec_out = self.forecast(batch_x,x_mask)
             return dec_out[:, -self.pred_len: , :]
