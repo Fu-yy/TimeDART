@@ -205,6 +205,13 @@ parser.add_argument('--seq_len', type=int, default=96, help='seq_len')
 parser.add_argument('--denoise_layers_num', type=int, default=3, help='denoise_layers_num')
 parser.add_argument('--inverse', action='store_true', help='inverse output data', default=False)
 
+# ---  扩散分解
+parser.add_argument('--timesteps', type=int, help='timesteps', default=100)
+parser.add_argument('--beta_schedule', type=str, help='beta_schedule', default='linear')
+parser.add_argument('--eta', type=int, help='eta', default=0)
+parser.add_argument('--loss_type', type=str, help='loss_type', default='l1')
+parser.add_argument('--sampling_timesteps', type=int, help='sampling_timesteps', default=1)
+
 args = parser.parse_args()
 args.use_gpu = True if torch.cuda.is_available() and args.use_gpu else False
 a = torch.cuda.is_available()

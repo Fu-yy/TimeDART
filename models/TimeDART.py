@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn as nn
 from einops import rearrange, repeat
@@ -52,6 +54,143 @@ def plot_tensors(tensor_list,file_name,index):
     plt.tight_layout()
     plt.savefig( fig_path + os.sep + file_name + '_' +str(index)  +'_figure.png')
 
+
+import torch
+from torch import nn
+
+
+class STRNetwork(nn.Module):
+    def __init__(self, seq_len, pred_len, patch_len, stride, padding_patch):
+        super(STRNetwork, self).__init__()
+
+        # Parameters
+        self.pred_len = pred_len
+
+        # Non-linear Stream
+        # Patching
+        self.patch_len = patch_len
+        self.stride = stride
+        self.padding_patch = padding_patch
+        self.dim = patch_len * patch_len
+        self.patch_num = (seq_len - patch_len) // stride + 1
+        if padding_patch == 'end':  # can be modified to general case
+            self.padding_patch_layer = nn.ReplicationPad1d((0, stride))
+            self.patch_num += 1
+
+        # Patch Embedding
+        self.fc1 = nn.Linear(patch_len, self.dim)
+        self.gelu1 = nn.GELU()
+        self.bn1 = nn.BatchNorm1d(self.patch_num)
+
+        # CNN Depthwise
+        self.conv1 = nn.Conv1d(self.patch_num, self.patch_num,
+                               patch_len, patch_len, groups=self.patch_num)
+        self.gelu2 = nn.GELU()
+        self.bn2 = nn.BatchNorm1d(self.patch_num)
+
+        # Residual Stream
+        self.fc2 = nn.Linear(self.dim, patch_len)
+
+        # CNN Pointwise
+        self.conv2 = nn.Conv1d(self.patch_num, self.patch_num, 1, 1)
+        self.gelu3 = nn.GELU()
+        self.bn3 = nn.BatchNorm1d(self.patch_num)
+
+        # Flatten Head
+        self.flatten1 = nn.Flatten(start_dim=-2)
+        self.fc3 = nn.Linear(self.patch_num * patch_len, pred_len * 2)
+        self.gelu4 = nn.GELU()
+        self.fc4 = nn.Linear(pred_len * 2, pred_len)
+
+        # Linear Stream
+        # MLP
+        self.fc5 = nn.Linear(seq_len, pred_len * 4)
+        self.avgpool1 = nn.AvgPool1d(kernel_size=2)
+        self.ln1 = nn.LayerNorm(pred_len * 2)
+
+        self.fc6 = nn.Linear(pred_len * 2, pred_len)
+        self.avgpool2 = nn.AvgPool1d(kernel_size=2)
+        self.ln2 = nn.LayerNorm(pred_len // 2)
+
+        self.fc7 = nn.Linear(pred_len // 2, pred_len)
+
+        # Streams Concatination
+        self.fc8 = nn.Linear(pred_len * 2, pred_len)
+
+    def forward(self, s, t):
+        # x: [Batch, Input, Channel]
+        # s - seasonality
+        # t - trend
+
+        s = s.permute(0, 2, 1)  # to [Batch, Channel, Input]
+        t = t.permute(0, 2, 1)  # to [Batch, Channel, Input]
+
+        # Channel split for channel independence
+        B = s.shape[0]  # Batch size
+        C = s.shape[1]  # Channel size
+        I = s.shape[2]  # Input size
+        s = torch.reshape(s, (B * C, I))  # [Batch and Channel, Input]
+        t = torch.reshape(t, (B * C, I))  # [Batch and Channel, Input]
+
+        # Non-linear Stream
+        # Patching
+        if self.padding_patch == 'end':
+            s = self.padding_patch_layer(s)  # 96 -- 104
+        s = s.unfold(dimension=-1, size=self.patch_len, step=self.stride)  # 224 12 16
+        # s: [Batch and Channel, Patch_num, Patch_len]
+
+        # Patch Embedding
+        s = self.fc1(s)
+        s = self.gelu1(s)
+        s = self.bn1(s)
+
+        res = s
+
+        # CNN Depthwise
+        s = self.conv1(s)
+        s = self.gelu2(s)
+        s = self.bn2(s)
+
+        # Residual Stream
+        res = self.fc2(res)
+        s = s + res
+
+        # CNN Pointwise
+        s = self.conv2(s)
+        s = self.gelu3(s)
+        s = self.bn3(s)
+
+        # Flatten Head
+        s = self.flatten1(s)
+        s = self.fc3(s)
+        s = self.gelu4(s)
+        s = self.fc4(s)
+
+        # Linear Stream
+        # MLP
+        t = self.fc5(t)
+        t = self.avgpool1(t)
+        t = self.ln1(t)
+
+        t = self.fc6(t)
+        t = self.avgpool2(t)
+        t = self.ln2(t)
+
+        t = self.fc7(t)
+
+        # Streams Concatination
+        # x = torch.cat((s, t), dim=1)
+        # x = self.fc8(x)
+        #
+        # # Channel concatination
+        # x = torch.reshape(x, (B, C, self.pred_len))  # [Batch, Channel, Output]
+        #
+        # x = x.permute(0, 2, 1)  # to [Batch, Output, Channel]
+
+        return t,s
+
+
+
 class FlattenHead(nn.Module):
     def __init__(
         self,
@@ -63,7 +202,7 @@ class FlattenHead(nn.Module):
         super(FlattenHead, self).__init__()
         self.pred_len = pred_len
         self.flatten = nn.Flatten(start_dim=-2)
-        self.forecast_head = nn.Linear(seq_len * d_model, pred_len)
+        self.forecast_head = nn.Linear(seq_len , pred_len)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -71,8 +210,10 @@ class FlattenHead(nn.Module):
         :param x: [batch_size, num_features, seq_len, d_model]
         :return: [batch_size, pred_len, num_features]
         """
+        b,nvar,l = x.shape
         x = self.flatten(x)  # (batch_size, num_features, seq_len * d_model)
         x = self.forecast_head(x)  # (batch_size, num_features, pred_len)
+        x = torch.reshape(x, [-1,l,nvar])
         x = self.dropout(x)  # (batch_size, num_features, pred_len)
         x = x.permute(0, 2, 1)  # (batch_size, pred_len, num_features)
         return x
@@ -253,15 +394,32 @@ class DenoisingConditionDecoder(nn.Module):
 
 
 
+class TimeEmbedding(nn.Module):
+    def __init__(self, d_model):
+        super().__init__()
+        self.d_model = d_model
+        self.mlp = nn.Sequential(
+            nn.Linear(self.d_model, self.d_model),
+            nn.SiLU(),
+            nn.Linear(self.d_model, self.d_model)
+        )
 
+    def forward(self, t):
+        # 输入t的形状: (batch_size,)
+        half_dim = self.d_model // 2
+        emb = math.log(10000) / (half_dim - 1)
+        emb = torch.exp(torch.arange(half_dim, device=t.device) * -emb)
+        emb = t.float()[:, None] * emb[None, :]  # (batch_size, half_dim)
+        emb = torch.cat([torch.sin(emb), torch.cos(emb)], dim=1)  # (batch_size, embed_dim)
+        return self.mlp(emb)  # 输出形状: (batch_size, embed_dim)
 
-class Model(nn.Module):
+class TimeDART(nn.Module):
     """
     TimeDART
     """
 
     def __init__(self, configs):
-        super(Model, self).__init__()
+        super(TimeDART, self).__init__()
         self.configs = configs
         self.input_len = configs.input_len
 
@@ -274,63 +432,26 @@ class Model(nn.Module):
         self.task_name = configs.task_name
         self.pred_len = configs.pred_len
 
-        self.channel_independence = nn.ModuleList(
-            [ChannelIndependence(
-                input_len=self.input_len // (configs.down_sampling_window ** i),
-            )
-                for i in range(configs.down_sampling_layers + 1)
-            ]
-        )
-
-
 
         # Patch
         self.patch_len = configs.patch_len
         self.stride = configs.stride
-        self.patch = Patch(
-            patch_len=self.patch_len,
-            stride=self.stride,
-        )
+
         self.seq_len = int((self.input_len - self.patch_len) / self.stride) + 1
 
-        # Embedding
-        self.enc_embedding = PatchEmbedding(
-            patch_len=self.patch_len,
-            d_model=self.d_model,
-        )
 
-        self.positional_encoding = PositionalEncoding(
-            d_model=self.d_model,
-            dropout=self.dropout,
-        )
 
         sos_token = torch.randn(1, 1, self.d_model, device=self.device)
-        self.sos_token = nn.Parameter(sos_token, requires_grad=True)
 
-        self.add_sos_token_and_drop_last = AddSosTokenAndDropLast(
-            sos_token=self.sos_token,
-        )
 
-        # Encoder (Casual Trasnformer)
-        self.diffusion = Diffusion(
-            time_steps=configs.time_steps,
-            device=self.device,
-            scheduler=configs.scheduler,
-        )
-        self.encoder = CausalTransformer(
-            d_model=configs.d_model,
-            num_heads=configs.n_heads,
-            feedforward_dim=configs.d_ff,
-            dropout=configs.dropout,
-            num_layers=configs.e_layers,
-        )
+
 
         # 条件编码模块
         # 假设条件信息维度为 configs.condition_dim
-        self.conditional_encoding = ConditionalEncoding(
-            input_dim=self.d_model,
-            d_model=self.d_model
-        )
+        # self.conditional_encoding = ConditionalEncoding(
+        #     input_dim=self.d_model,
+        #     d_model=self.d_model
+        # )
         # 在 Model 类中替换 ConditionalEncoding
         # self.conditional_encoding_att = SeqAttention(
         #     target_dim=self.d_model,
@@ -339,108 +460,247 @@ class Model(nn.Module):
         #     dropout=self.dropout,
         # )
         # Decoder
-        if self.task_name == "pretrain":
-            self.denoising_patch_decoder = DenoisingPatchDecoder(
-                d_model=configs.d_model,
-                num_layers=configs.d_layers,
-                num_heads=configs.n_heads,
-                feedforward_dim=configs.d_ff,
-                dropout=configs.dropout,
-            )
+        # if self.task_name == "pretrain":
+        #     self.denoising_patch_decoder = DenoisingPatchDecoder(
+        #         d_model=configs.d_model,
+        #         num_layers=configs.d_layers,
+        #         num_heads=configs.n_heads,
+        #         feedforward_dim=configs.d_ff,
+        #         dropout=configs.dropout,
+        #     )
+        #
+        #
+        #     self.projection = nn.ModuleList(
+        #         [FlattenHead(
+        #         seq_len=self.seq_len // (configs.down_sampling_window ** i),
+        #         d_model=self.d_model,
+        #         pred_len=configs.input_len,
+        #         dropout=configs.head_dropout,
+        #     )
+        #             for i in range(configs.down_sampling_layers + 1)
+        #         ]
+        #     )
+        #     self.regression = nn.ModuleList([
+        #         nn.Linear(self.input_len // (configs.down_sampling_window ** i), self.input_len)
+        #         for i in range(configs.down_sampling_layers + 1)
+        #     ])
+        #     self.regression = nn.ModuleList([
+        #         nn.Linear(self.input_len, self.input_len)
+        #         for i in range(configs.down_sampling_layers + 1)
+        #     ])
+        #
+        #
+        #
+        # elif self.task_name == "finetune":
+        #     # self.head = FlattenHead(
+        #     #     seq_len=self.seq_len,
+        #     #     d_model=configs.d_model,
+        #     #     pred_len=configs.pred_len,
+        #     #     dropout=configs.head_dropout,
+        #     # )
+        #
+        #     self.head = nn.ModuleList(
+        #         [FlattenHead(
+        #             seq_len=self.seq_len // (configs.down_sampling_window ** i),
+        #             d_model=self.d_model,
+        #             pred_len=configs.pred_len,
+        #             dropout=configs.head_dropout,
+        #         )
+        #             for i in range(configs.down_sampling_layers + 1)
+        #         ]
+        #     )
+        #
+        #     # self.regression = nn.Linear(self.input_len, configs.pred_len)
+        #     self.regression = nn.ModuleList([
+        #         nn.Linear(self.input_len // (configs.down_sampling_window ** i), configs.pred_len)
+        #         for i in range(configs.down_sampling_layers + 1)
+        #     ])
+        #
+        #     self.head = FlattenHead(
+        #             seq_len=self.seq_len,
+        #             d_model=self.d_model,
+        #             pred_len=configs.pred_len,
+        #             dropout=configs.head_dropout,
+        #         )
+        #
+        #
+        #     self.regression = nn.ModuleList([
+        #         nn.Linear(self.input_len, configs.pred_len)
+        #         for i in range(configs.down_sampling_layers + 1)
+        #     ])
+        #
+        #
+        # self.decomp_multi = series_decomp(95)
+        # self.denoise_layers_num = configs.denoise_layers_num
+        # self.denoise_layers = nn.ModuleList([
+        #     DenoisingPatchDecoder(
+        #         d_model=configs.d_model,
+        #         num_layers=configs.d_layers,
+        #         num_heads=configs.n_heads,
+        #         feedforward_dim=configs.d_ff,
+        #         dropout=configs.dropout,
+        #     )
+        #     for _ in range(self.denoise_layers_num)
+        # ])
+        #
+        # self.denoise_layers_cond = nn.ModuleList([
+        #     DenoisingConditionDecoder(
+        #         embed_dim=configs.d_model,
+        #         num_heads=configs.n_heads,
+        #         dropout=configs.dropout,
+        #     )
+        #     for _ in range(self.denoise_layers_num)
+        # ])
 
 
-            self.projection = nn.ModuleList(
-                [FlattenHead(
-                seq_len=self.seq_len // (configs.down_sampling_window ** i),
-                d_model=self.d_model,
-                pred_len=configs.input_len,
-                dropout=configs.head_dropout,
-            )
-                    for i in range(configs.down_sampling_layers + 1)
-                ]
-            )
-            self.regression = nn.ModuleList([
-                nn.Linear(self.input_len // (configs.down_sampling_window ** i), self.input_len)
-                for i in range(configs.down_sampling_layers + 1)
-            ])
-            self.regression = nn.ModuleList([
-                nn.Linear(self.input_len, self.input_len)
-                for i in range(configs.down_sampling_layers + 1)
-            ])
 
 
+        # -----------------------------------------------------------------------------
 
-        elif self.task_name == "finetune":
-            # self.head = FlattenHead(
-            #     seq_len=self.seq_len,
-            #     d_model=configs.d_model,
-            #     pred_len=configs.pred_len,
-            #     dropout=configs.head_dropout,
-            # )
+        # 时间步嵌入
+        self.time_embed = TimeEmbedding(configs.d_model)
+        # self.time_embed = nn.Embedding(1, configs.d_model)
+        self.input_proj = nn.Linear(1, configs.d_model)
+        # 可学习的位置编码
+        self.pos_embed = nn.Parameter(torch.randn(self.seq_len, configs.d_model))
 
-            self.head = nn.ModuleList(
-                [FlattenHead(
-                    seq_len=self.seq_len // (configs.down_sampling_window ** i),
-                    d_model=self.d_model,
-                    pred_len=configs.pred_len,
-                    dropout=configs.head_dropout,
-                )
-                    for i in range(configs.down_sampling_layers + 1)
-                ]
-            )
+        # 共享特征提取（谱归一化保证Lipschitz连续性）
+        self.encoder = nn.Sequential(
+            nn.utils.spectral_norm(nn.Conv1d(1, 64, 5, padding=2)),
+            nn.ReLU(),
+            nn.utils.spectral_norm(nn.Conv1d(64, configs.d_model, 5, padding=2))
+        )
 
-            # self.regression = nn.Linear(self.input_len, configs.pred_len)
-            self.regression = nn.ModuleList([
-                nn.Linear(self.input_len // (configs.down_sampling_window ** i), configs.pred_len)
-                for i in range(configs.down_sampling_layers + 1)
-            ])
+        # 趋势预测头
+        self.trend_head = nn.Sequential(
+            nn.utils.spectral_norm(nn.Conv1d(configs.d_model, 64, 3, padding=1)),
+            nn.ReLU(),
+            nn.utils.spectral_norm(nn.Conv1d(64, 1, 3, padding=1))
+        )
 
-            self.head = FlattenHead(
-                    seq_len=self.seq_len,
-                    d_model=self.d_model,
-                    pred_len=configs.pred_len,
-                    dropout=configs.head_dropout,
-                )
+        # 季节-残差分离头
+        self.season_resid_head = nn.Sequential(
+            nn.Conv1d(configs.d_model, 64, 3, padding=1),
+            nn.ReLU(),
+            nn.Conv1d(64, 2, 3, padding=1)
+        )
+
+        # 动态频率预测器
+        self.freq_predictor = nn.Linear(configs.d_model, 1)
+        self.str_net = STRNetwork(seq_len=self.input_len,pred_len=self.input_len,patch_len=self.patch_len,stride=self.stride,padding_patch='emd')
+        self.resid_linear = nn.Linear(self.input_len, self.input_len)
+
+        self.flat_head_trend = FlattenHead(
+            seq_len=self.input_len,
+            d_model=self.d_model,
+            pred_len=configs.input_len,
+            dropout=configs.head_dropout,
+        )
+        self.flat_head_season = FlattenHead(
+            seq_len=self.input_len,
+            d_model=self.d_model,
+            pred_len=configs.input_len,
+            dropout=configs.head_dropout,
+        )
+        self.flat_head_residual = FlattenHead(
+            seq_len=self.input_len,
+            d_model=self.d_model,
+            pred_len=configs.input_len,
+            dropout=configs.head_dropout,
+        )
+        # -----------------------------------------------------------------------------
+    def decomp_func(self,x,t):
+
+        x = x.permute(0, 2, 1)
+        batch_size, input_len, num_features = x.size()
+        means = torch.mean(
+            x, dim=1, keepdim=True
+        ).detach()  # [batch_size, 1, num_features], detach from gradient
+        x = x - means  # [batch_size, input_len, num_features]
+        stdevs = torch.sqrt(
+            torch.var(x, dim=1, keepdim=True, unbiased=False) + 1e-5
+        ).detach()  # [batch_size, 1, num_features]
+        x = x / stdevs  # [batch_size, input_len, num_features]
+        x = x.permute(0,2,1)
+
+        B,_,seqlen=x.shape
+        # 时间嵌入
+        t_emb = self.time_embed(t)
+        # 特征提取
+        feat = self.encoder(x)
+
+        feat = feat + t_emb.unsqueeze(-1)
+        # 趋势预测
+        trend = self.trend_head(feat)
 
 
-            self.regression = nn.ModuleList([
-                nn.Linear(self.input_len, configs.pred_len)
-                for i in range(configs.down_sampling_layers + 1)
-            ])
+        # 季节项计算：x - trend，并施加频域约束
+        # 动态频率掩码
+        freq_weights = torch.sigmoid(self.freq_predictor(feat.mean(dim=2)))
+        season = x - trend
+        season_fft = torch.fft.rfft(season, dim=-1)
+        H_low = self._generate_lowpass_mask(freq_weights)
+        season_filtered = torch.fft.irfft(season_fft * H_low, n=self.input_len)
+
+        # 残差计算：剩余部分
+        resid = x - trend - season_filtered
 
 
-        self.decomp_multi = series_decomp(95)
-        self.denoise_layers_num = configs.denoise_layers_num
-        self.denoise_layers = nn.ModuleList([
-            DenoisingPatchDecoder(
-                d_model=configs.d_model,
-                num_layers=configs.d_layers,
-                num_heads=configs.n_heads,
-                feedforward_dim=configs.d_ff,
-                dropout=configs.dropout,
-            )
-            for _ in range(self.denoise_layers_num)
-        ])
+        trend,season_filtered,resid = self.inverse_transform(trend.permute(0,2,1),season_filtered.permute(0,2,1),resid.permute(0,2,1), means,
+                                                                        stdevs)
+        return trend.permute(0,2,1),season_filtered.permute(0,2,1),resid.permute(0,2,1)
 
-        self.denoise_layers_cond = nn.ModuleList([
-            DenoisingConditionDecoder(
-                embed_dim=configs.d_model,
-                num_heads=configs.n_heads,
-                dropout=configs.dropout,
-            )
-            for _ in range(self.denoise_layers_num)
-        ])
 
-    def pretrain(self, x,x_mask,i=0):
+    def _generate_lowpass_mask(self, freq_weights):
+        B = freq_weights.size(0)
+        F = self.input_len // 2 + 1
 
-        # [batch_size, input_len, num_features]
-        # Instance Normalization
+        # 生成频率索引矩阵 [B, F]
+        freq_indices = torch.arange(F, device=freq_weights.device).view(1, F).expand(B, F)
 
-        # x = torch.fft.fft(x,dim=-2).real
-        mask_rate = 0.5
-        lm=3
-        positive_nums=1
-        e_x =x
+        # 计算截止频率索引 [B, 1]
+        cutoff = (freq_weights * F).long().clamp(0, F - 1)
+
+        # 向量化比较生成掩码 [B, F]
+        mask = (freq_indices < cutoff).float()
+
+        # 添加通道维度 [B, 1, F]
+        return mask.unsqueeze(1)
+
+    def inverse_transform(self,trend_norm, season_norm, resid_norm, scaler_mean, scaler_std):
+        trend_raw = trend_norm * (scaler_std[:, 0, :].unsqueeze(1)).repeat(
+            1, self.input_len, 1
+        ) + (scaler_mean[:, 0, :].unsqueeze(1)).repeat(
+            1, self.input_len, 1
+        )
+        season_raw = season_norm * (scaler_std[:, 0, :].unsqueeze(1)).repeat(
+            1, self.input_len, 1
+        )
+        residual_raw = resid_norm * (scaler_std[:, 0, :].unsqueeze(1)).repeat(
+            1, self.input_len, 1
+        )
+        return trend_raw, season_raw, residual_raw
+
+    def predit(self, trend,season,resid):
+        batch_size,n, input_len  = trend.shape
+        trend = trend.permute(0, 2, 1)
+        season = season.permute(0, 2, 1)
+        resid = resid.permute(0, 2, 1)
+
+        res_t, res_s = self.str_net(trend, season)
+        res_t = torch.reshape(res_t, (batch_size, input_len, 1))
+        res_s = torch.reshape(res_s, (batch_size, input_len, 1))
+        resid = self.resid_linear(resid.permute(0, 2, 1)).permute(0, 2, 1)
+
+        flat_trend = self.flat_head_trend(res_t)
+        flat_season = self.flat_head_season(res_s)
+        flat_residual = self.flat_head_residual(resid)
+
+        return flat_trend ,flat_season , flat_residual
+
+    def pretrain(self, x,t):
+
+        x = x.permute(0,2,1)
         batch_size, input_len, num_features = x.size()
         means = torch.mean(
             x, dim=1, keepdim=True
@@ -451,135 +711,12 @@ class Model(nn.Module):
         ).detach()  # [batch_size, 1, num_features]
         x = x / stdevs  # [batch_size, input_len, num_features]
 
-        x, trend = self.decomp_multi(x)
-        # res0 = torch.stack((e_x[0,:,0],x[0,:,0],trend[0,:,0]),dim=-1)
-        # df0 = pd.DataFrame(res0.cpu().numpy())  # 先转移到CPU
-        # df0.to_excel('output0.xlsx', index=False, header=False)
-        # res1 = torch.stack((e_x[1,:,0],x[1,:,0],trend[1,:,0]),dim=-1)
-        # df1 = pd.DataFrame(res1.cpu().numpy())  # 先转移到CPU
-        # df1.to_excel('output1.xlsx', index=False, header=False)
-        # res2 = torch.stack((e_x[2,:,0],x[2,:,0],trend[2,:,0]),dim=-1)
-        # df2 = pd.DataFrame(res2.cpu().numpy())  # 先转移到CPU
-        # df2.to_excel('output3.xlsx', index=False, header=False)
-        # res3 = torch.stack((e_x[3,:,0],x[3,:,0],trend[3,:,0]),dim=-1)
-        # df3 = pd.DataFrame(res3.cpu().numpy())  # 先转移到CPU
-        # df3.to_excel('output4.xlsx', index=False, header=False)
+        trend,season, resid = self.decomp_func(x.permute(0,2,1),t)
+        flat_trend, flat_season, flat_residual = self.predit(trend,season,resid)
+        flat_trend, flat_season, flat_residual = self.inverse_transform(flat_trend, flat_season, flat_residual,means,stdevs)
+        predict_x = flat_trend.permute(0,2,1) + flat_season.permute(0,2,1) + flat_residual.permute(0,2,1)
 
-        # x, trend = x,x
-        # Channel Independence
-        x = self.channel_independence[0](x)  # [batch_size * num_features, input_len, 1]
-        # Patch
-        x_patch = self.patch(x)  # [batch_size * num_features, seq_len, patch_len]
-        # x_patch_f = torch.fft.fft(x_patch,dim=-2).imag
-
-        # For Casual Transformer
-        x_embedding = self.enc_embedding(
-            x_patch
-        )  # [batch_size * num_features, seq_len, d_model]
-
-
-
-
-
-        x_embedding_bias = self.add_sos_token_and_drop_last(
-            x_embedding
-        )  # [batch_size * num_features, seq_len, d_model]
-
-
-        x_embedding_bias = self.positional_encoding(x_embedding_bias)
-
-
-
-        x_embedding_bias, _ = self.decomp_multi(x_embedding_bias)
-        # x_embedding_bias, _ = x_embedding_bias,x_embedding_bias
-
-        x_out = self.encoder(
-            x_embedding_bias,
-            is_mask=True,
-        )  # [batch_size * num_features, seq_len, d_model]
-
-
-
-        res_pred = []
-        for layer in self.denoise_layers_cond:
-            x = self.channel_independence[0](x)  # [batch_size * num_features, input_len, 1]
-            # Patch
-            x_patch = self.patch(x)  # [batch_size * num_features, seq_len, patch_len]
-
-            # item = x_out
-            x_patch, default_trend1 = self.decomp_multi(x_patch)
-            # x_patch, default_trend = x_patch,x_patch
-
-            noise_x_patch, _, _ = self.diffusion(
-                x_patch
-            )  # [batch_size * num_features, seq_len, patch_len]
-
-
-            noise_x_embedding = self.enc_embedding(
-                noise_x_patch
-            )  # [batch_size * num_features, seq_len, d_model]
-            noise_x_embedding = self.positional_encoding(noise_x_embedding)
-            noise_x_embedding_res = noise_x_embedding
-            # noise end --------------------------
-            noise_x_embedding, default_trend2 = self.decomp_multi(noise_x_embedding)
-
-
-
-            # noise_x_embedding, _ = noise_x_embedding,noise_x_embedding
-            x_out, x_out_trend = self.decomp_multi(x_out)
-            # x_out, x_out_trend = x_out,x_out
-
-            # --------------------------- 添加条件 begin
-            # 获取条件编码
-            # cond_encoded = self.conditional_encoding_att(x_out_trend)  # [batch_size, 1, d_model]
-            cond_encoded = self.conditional_encoding(x_out_trend)  # [batch_size, 1, d_model]
-            # 扩展条件编码以匹配批次和特征维度
-            # cond_encoded = cond_encoded.repeat_interleave(x_out_trend.size(0) // cond_encoded.size(0),
-            #                                               dim=0)  # [batch_size * num_features, 1, d_model]
-            # cond_encoded = cond_encoded.expand(-1, x_out_trend.size(1), -1)  # [batch_size * num_features, seq_len, d_model]
-
-            # 将条件编码添加到嵌入中
-
-            # --------------------------- 添加条件 end
-
-
-            # For Denoising Patch Decoder
-            denoise_out = layer(
-                Noise_x=noise_x_embedding,
-                X=x_out,
-                cond=cond_encoded
-            )  # [batch_size * num_features, seq_len, d_model]
-
-            # default_trend2_reg = self.trend2_regression(default_trend2.permute(0,2,1)).permute(0,2,1)
-            # denoise_out = denoise_out + default_trend2_reg
-            denoise_out = denoise_out.reshape(
-                batch_size, num_features, -1, self.d_model
-            )  # [batch_size, num_features, seq_len, d_model]
-            denoise_out = self.projection[0](denoise_out)  # [batch_size, input_len, num_features]
-            x = denoise_out
-
-
-            predict_x = denoise_out + self.regression[0](trend.permute(0,2,1)).permute(0,2,1).contiguous()
-            # predict_x = denoise_out
-            # res_pred.append(predict_x)
-        # predict_x = predict_x + self.regression[0](trend.permute(0,2,1)).permute(0,2,1).contiguous()
-        # if i % 20 == 0:
-        #     no_trend = [default_trend1,default_trend2,x_patch,noise_x_embedding]
-        #     plot_tensors(no_trend,'notrend',i)
-        #     trend_list = [default_trend1,default_trend2,x_patch,noise_x_embedding,trend]
-        #     plot_tensors(trend_list,'withtrend',i)
-
-
-        # Instance Denormalization
-        predict_x = predict_x * (stdevs[:, 0, :].unsqueeze(1)).repeat(
-            1, input_len, 1
-        )  # [batch_size, input_len, num_features]
-        predict_x = predict_x + (means[:, 0, :].unsqueeze(1)).repeat(
-            1, input_len, 1
-        )  # [batch_size, input_len, num_features]
-        # predict_x = torch.fft.ifft(predict_x,dim=-2).real
-
-        return predict_x
+        return predict_x,flat_trend ,flat_season , flat_residual
 
     def forecast(self, x,x_mark):
         # x = torch.fft.fft(x,dim=-2).real
@@ -641,12 +778,12 @@ class Model(nn.Module):
 
         return x
 
-    def forward(self, batch_x,x_mask,i=0):
+    def forward(self, batch_x,t):
 
         if self.task_name == "pretrain":
-            return self.pretrain(batch_x,x_mask,i)
+            return self.pretrain(batch_x,t)
         elif self.task_name == "finetune":
-            dec_out = self.forecast(batch_x,x_mask)
+            dec_out = self.forecast(batch_x,t)
             return dec_out[:, -self.pred_len: , :]
         else:
             raise ValueError("task_name should be 'pretrain' or 'finetune'")

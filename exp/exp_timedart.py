@@ -187,6 +187,8 @@ class Exp_TimeDART(Exp_Basic):
                 diff_loss = self.model(batch_x)
                 # diff_loss.requires_grad = True
             # diff_loss = model_criterion(pred_x, batch_x)
+            elif self.args.model == 'DiffusionModel':
+                diff_loss = self.model(batch_x)
             else:
                 pred_x = self.model(batch_x,batch_x_m,i)
                 # diff_loss = self.model(batch_x)
@@ -227,6 +229,12 @@ class Exp_TimeDART(Exp_Basic):
                     # pred_x = self.model(batch_x)
                     diff_loss = self.model(batch_x)
                 # diff_loss = model_criterion(pred_x, batch_x)
+                elif self.args.model == 'DiffusionModel':
+                    pred_x = self.model.generate_mts(batch_x)
+                    finel_result = torch.stack(pred_x,dim=-1).sum(-1)
+                    finel_result = torch.reshape(finel_result,[batch_x.shape[0],batch_x.shape[-1],batch_x.shape[1]])
+                    finel_result = finel_result.permute(0,2,1)
+                    diff_loss = model_criterion(finel_result, batch_x)
                 else:
                     pred_x = self.model(batch_x,batch_x_m)
                     # diff_loss = self.model(batch_x)
@@ -283,12 +291,12 @@ class Exp_TimeDART(Exp_Basic):
                 batch_y = batch_y.float().to(self.device)
                 batch_x_mark = batch_x_mark.float().to(self.device)
 
-                pred_x = self.model(batch_x,batch_x_mark)
 
                 f_dim = -1 if self.args.features == "MS" else 0
+                batch_y = batch_y[:, -self.args.pred_len :, f_dim:]
+                pred_x = self.model(batch_y)
 
                 pred_x = pred_x[:, -self.args.pred_len :, f_dim:]
-                batch_y = batch_y[:, -self.args.pred_len :, f_dim:]
 
                 loss = model_criteria(pred_x, batch_y)
                 loss.backward()
