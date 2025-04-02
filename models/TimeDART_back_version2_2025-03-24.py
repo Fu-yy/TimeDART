@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 from einops import rearrange, repeat
 import pandas as pd
-from scipy.signal import find_peaks
 
 from layers.Autoformer_EncDec import moving_avg, series_decomp
 from layers.Transformer_EncDec import Decoder, DecoderLayer, Encoder, EncoderLayer
@@ -22,149 +21,8 @@ import os
 import torch.nn as nn
 
 import matplotlib.pyplot as plt
-# TimeDART_version2
-# 只保留15分解，用新的分解策略
 
 
-def calculate_scales_optimized(data, num_scales=3, max_lag=63, peak_threshold=0.3):
-    """完全基于PyTorch的优化实现"""
-    # 数据预处理 [B, L, C] -> [B, C, L]
-    x = data.permute(0, 2, 1)
-    B, C, L = x.shape
-
-    # 批标准化
-    x_mean = x.mean(dim=2, keepdim=True)
-    x_centered = x - x_mean
-    x_norm = x_centered / (x_centered.std(dim=2, keepdim=True) + 1e-8)
-
-    # FFT加速自相关计算
-    pad_size = L
-    x_padded = torch.nn.functional.pad(x_norm, (0, pad_size))
-    fft_x = torch.fft.rfft(x_padded, dim=2)
-    acf = torch.fft.irfft(fft_x * fft_x.conj(), dim=2)[..., :L]
-    acf = acf / (acf[..., :1] + 1e-8)
-
-    # 聚合所有通道和批次
-    mean_acf = acf.mean(dim=(0, 1))  # [L]
-
-    # 峰值检测（PyTorch实现）
-    # peaks = find_peaks_torch(
-    #     mean_acf[:max_lag],
-    #     height=peak_threshold,
-    #     distance=10,
-    #     max_num=num_scales * 2
-    # )
-
-    peaks, _ = find_peaks(mean_acf[:max_lag],
-                          height=peak_threshold,
-                          distance=10)
-
-    # 选择主要尺度
-    if len(peaks) == 0:
-        return [15, 31, 63][:num_scales]
-
-    # 密度估计选择
-    hist = torch.histc(
-        peaks.float(),
-        bins=max_lag,
-        min=0,
-        max=max_lag - 1
-    )
-    scales = []
-    for _ in range(num_scales):
-        max_bin = hist.argmax()
-        if hist[max_bin] == 0:
-            break
-        scales.append(max_bin.item())
-        hist[max(0, max_bin - 5):max_bin + 6] = 0
-
-    # 确保奇数尺寸
-    return sorted([s if s % 2 else s + 1 for s in scales[:num_scales]])
-
-
-class FixedMultiScaleConv(nn.Module):
-    def __init__(self, nvar, scales=[15, 31, 63]):
-        super().__init__()
-        self.conv_layers = nn.ModuleList([
-            nn.Conv1d(nvar, nvar, kernel_size=k, padding=(k - 1) // 2,
-                      groups=nvar, bias=False)
-            for k in scales
-        ])
-        # 固定为均值滤波且不更新权重
-        for conv in self.conv_layers:
-            conv.weight.data = torch.ones_like(conv.weight) / conv.kernel_size[0]
-            conv.weight.requires_grad = False
-
-    def forward(self, x):
-        return [conv(x) for conv in self.conv_layers]
-
-
-class LightWeightGenerator(nn.Module):
-    def __init__(self, nvar, num_scales):
-        super().__init__()
-        self.nvar = nvar
-        self.num_scales = num_scales
-        self.gen = nn.Sequential(
-            nn.AdaptiveAvgPool1d(1),  # [B,C,1]
-            nn.Flatten(start_dim=1),  # [B,C]
-            nn.Linear(nvar, nvar * num_scales),  # [B, C*K]
-            nn.Unflatten(-1, (nvar, num_scales)),  # [B,C,K]
-            nn.Softmax(dim=-1)  # 沿尺度维度归一化
-        )
-
-    def forward(self, x):
-        weights = self.gen(x)  # [B,C,K]
-        return weights.unsqueeze(-1)  # [B,C,K,1]
-
-
-class StopLearnableMultiScaleDecomp(nn.Module):
-    def __init__(self, nvar, scales=[15, 31, 63]):
-        super().__init__()
-        self.nvar = nvar
-        self.scales = scales
-        self.num_scales = len(scales)
-
-        # 多尺度卷积组（固定参数）
-        self.fixed_convs = FixedMultiScaleConv(nvar, scales)
-
-        # 轻量权重生成器
-        self.weight_gen = LightWeightGenerator(nvar, self.num_scales)
-        # self.local_encoder = nn.Conv1d(nvar, nvar, 3, padding=1, groups=nvar)
-    def forward(self, x):
-        # 输入形状: [Batch, Length, Channels]
-        B, L, C = x.shape
-        x = x.permute(0, 2, 1)  # [B, C, L]
-        # x_local = self.local_encoder(x.permute(0, 2, 1))  # 捕捉局部模式
-        # x = 0.8 * x.permute(0, 2, 1) + 0.2 * x_local  # 特征融合
-        # 多尺度趋势提取
-        trends = self.fixed_convs(x)  # list of [B,C,L]
-        trends = torch.stack(trends, dim=-1)  # [B,C,L,K]
-
-        # 生成融合权重
-        weights = self.weight_gen(x)  # [B,C,K,1]
-        weights = weights.permute(0,1,3,2)
-        # 加权融合（广播机制）
-        fused_trend = (trends * weights).sum(dim=-1)  # [B,C,L]
-
-        # 季节项
-        seasonal = x - fused_trend
-
-        # 频域约束（抑制高频）
-        trend_fft = torch.fft.rfft(fused_trend, dim=-1)
-        freq_loss = torch.mean(torch.abs(trend_fft[..., 2:]))  # 忽略前5个低频
-
-        # 平滑性约束
-        smooth_loss = torch.mean(torch.diff(fused_trend, n=2, dim=-1) ** 2)
-
-        # 正交约束
-        orth_loss = torch.mean((seasonal * fused_trend).sum(dim=-1) ** 2)
-
-        # total_loss = freq_loss + 0.1 * smooth_loss + 0.1 * orth_loss
-        # 季节项高频激励（可选）
-        seasonal_fft = torch.fft.rfft(seasonal, dim=2)  # [B,C, L//2+1]
-        season_freq_loss = -torch.mean(torch.abs(seasonal_fft[..., 5:]))  # 激励高频
-
-        return seasonal.permute(0, 2, 1), fused_trend.permute(0, 2, 1), freq_loss,orth_loss,smooth_loss,season_freq_loss
 def plot_tensors(tensor_list,file_name,index):
     project_path = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
     fig_path = project_path + os.sep + 'trend_figs'
@@ -223,6 +81,100 @@ class FlattenHead(nn.Module):
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+
+
+class TrendExtractorConv(nn.Module):
+    def __init__(self, input_dim, d_model, kernel_size=3):
+        super(TrendExtractorConv, self).__init__()
+        self.conv = nn.Conv1d(in_channels=input_dim, out_channels=d_model, kernel_size=kernel_size,
+                              padding=kernel_size // 2)
+        self.activation = nn.ReLU()
+        # self.pool = nn.AdaptiveAvgPool1d(1)  # 将每个特征图压缩为一个值
+
+    def forward(self, x):
+        # x: [batch_size, seq_len, input_dim]
+        x = x.permute(0, 2, 1)  # [batch_size, input_dim, seq_len]
+        x = self.conv(x)  # [batch_size, d_model, seq_len]
+        x = self.activation(x)
+        return x.permute(0, 2, 1).contiguous()
+
+
+class ConditionalEncoding_old(nn.Module):
+    def __init__(self, input_dim, d_model):
+        super(ConditionalEncoding_old, self).__init__()
+        self.trend_extractor = TrendExtractorConv(input_dim, d_model)
+        self.condition_proj = nn.Linear(d_model, d_model)
+        self.activation = nn.ReLU()
+
+    def forward(self, x):
+        """
+        x: [batch_size, seq_len, input_dim]
+        返回: [batch_size, 1, d_model]
+        """
+        trend = self.trend_extractor(x)  # [batch_size, 1, d_model]
+        cond_encoded = self.condition_proj(trend)  # [batch_size, 1, d_model]
+        cond_encoded = self.activation(cond_encoded)
+        return cond_encoded
+
+class DenoisingConditionDecoder_old(nn.Module):
+    def __init__(self, embed_dim, num_heads=1,dropout=0.1):
+        super(DenoisingConditionDecoder_old, self).__init__()
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.norm2 = nn.LayerNorm(embed_dim)
+        self.ff = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim*2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(embed_dim*2, embed_dim),
+        )
+        self.dropout = nn.Dropout(dropout)
+        self.gate = nn.Linear(embed_dim * 2, embed_dim)
+        self.sigmoid = nn.Sigmoid()
+
+
+
+    def compute_attention(self, q, k, v):
+        scores = torch.matmul(q, k) / torch.sqrt(torch.tensor(q.size(-1)))
+        attn_weights = F.softmax(scores, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+        output = torch.matmul(attn_weights, v)
+        return output, attn_weights
+
+    def forward(self,Noise_x,X,cond):
+
+        # ------------------------------
+        # 融合 Q 和 cond
+        combined = torch.cat([Noise_x, cond], dim=-1)  # [batch_size, seq_len, embed_dim * 2]
+        gate = self.sigmoid(self.gate(combined))  # [batch_size, seq_len, embed_dim]
+        fused = gate * Noise_x + (1 - gate) * cond  # 融合后的表示
+        # ------------------------------
+
+
+        A,B,C,D = Noise_x[0, :, 0], cond[0, :, 0],fused[0,:,0], X[0, :, 0]
+
+        query= fused
+        key = X.permute(0,2,1).contiguous()
+        value = X
+        attn_output,_ = self.compute_attention(query, key, value)
+
+        query = self.norm1(query + self.dropout(attn_output))
+
+        # Feed-forward network
+        ff_output = self.ff(query)
+        output = self.norm2(query + self.dropout(ff_output))
+
+
+        # res0 = torch.stack((A, B,C, D,output[0,:,0]), dim=-1)
+        # df0 = pd.DataFrame(res0.cpu().detach().numpy())  # 先转移到CPU
+        # df0.to_excel('output2.xlsx', index=False, header=False)
+
+
+        return output
+
+
 
 
 class LearnableMultiScaleDecomp(nn.Module):
@@ -291,99 +243,120 @@ class LearnableMultiScaleDecomp(nn.Module):
         smoothness = torch.mean(torch.diff(fused_trend, n=2, dim=2) ** 2)
         return seasonal.permute(0, 2, 1), fused_trend.permute(0, 2, 1),freq_loss,orth_loss,smoothness
 
-class TrendExtractorConv(nn.Module):
-    def __init__(self, input_dim, d_model, kernel_size=3):
-        super(TrendExtractorConv, self).__init__()
-        self.conv = nn.Conv1d(in_channels=input_dim, out_channels=d_model, kernel_size=kernel_size,
-                              padding=kernel_size // 2)
-        self.activation = nn.ReLU()
-        # self.pool = nn.AdaptiveAvgPool1d(1)  # 将每个特征图压缩为一个值
+class MultiScaleTrendExtractor(nn.Module):
+    def __init__(self, input_dim, d_model, scales=[3, 5, 7]):
+        super().__init__()
+        self.convs = nn.ModuleList([
+            nn.Conv1d(input_dim, d_model, k, padding=k // 2)
+            for k in scales
+        ])
+        self.attn = nn.Sequential(
+            nn.Linear(len(scales) * d_model, 4 * d_model),
+            nn.GELU(),
+            nn.Linear(4 * d_model, len(scales)),
+            nn.Softmax(dim=-1)
+        )
+        self.pool = nn.AdaptiveMaxPool1d(1)
 
     def forward(self, x):
-        # x: [batch_size, seq_len, input_dim]
-        x = x.permute(0, 2, 1)  # [batch_size, input_dim, seq_len]
-        x = self.conv(x)  # [batch_size, d_model, seq_len]
-        x = self.activation(x)
-        return x.permute(0, 2, 1).contiguous()
+        B, L, C = x.shape
+        x = x.permute(0, 2, 1)  # [B, C, L]
 
+        # 多尺度特征
+        features = [conv(x) for conv in self.convs]  # 各尺度特征形状 [B, d_model, L]
 
+        # 自适应融合
+        global_features = torch.cat([self.pool(f).squeeze(-1) for f in features], dim=-1)  # [B, scales*d_model]
+        attn_weights = self.attn(global_features)  # [B, scales]
+
+        # 拆分权重并按维度扩展
+        fused = sum(
+            w.unsqueeze(-1).unsqueeze(-1) * f  # w形状 [B,1,1], f形状 [B,d_model,L]
+            for w, f in zip(attn_weights.unbind(dim=1), features)
+        )
+
+        pooled = self.pool(fused)  # [B, d_model, 1]
+        return pooled.permute(0, 2, 1)  # [B, 1, d_model]
 class ConditionalEncoding(nn.Module):
     def __init__(self, input_dim, d_model):
-        super(ConditionalEncoding, self).__init__()
-        self.trend_extractor = TrendExtractorConv(input_dim, d_model)
-        self.condition_proj = nn.Linear(d_model, d_model)
-        self.activation = nn.ReLU()
+        super().__init__()
+        self.trend_extractor = MultiScaleTrendExtractor(input_dim, d_model)
+        self.condition_proj = nn.Sequential(
+            nn.Linear(d_model, 2*d_model),
+            nn.GELU(),
+            nn.Linear(2*d_model, d_model),
+            nn.LayerNorm(d_model)
+        )
+        self.gate = nn.Sequential(
+            nn.Linear(d_model, d_model),
+            nn.Sigmoid()
+        )
 
     def forward(self, x):
-        """
-        x: [batch_size, seq_len, input_dim]
-        返回: [batch_size, 1, d_model]
-        """
-        trend = self.trend_extractor(x)  # [batch_size, 1, d_model]
-        cond_encoded = self.condition_proj(trend)  # [batch_size, 1, d_model]
-        cond_encoded = self.activation(cond_encoded)
-        return cond_encoded
+        trend = self.trend_extractor(x)  # [B, 1, d_model]
+        proj_trend = self.condition_proj(trend)
+        gate = self.gate(proj_trend)
+        return proj_trend * gate  # 自适应特征选择
+class AdaptiveFusion(nn.Module):
+    def __init__(self, d_model):
+        super().__init__()
+        # SE式通道门控
+        self.channel_gate = nn.Sequential(
+            nn.AdaptiveAvgPool1d(1),
+            nn.Flatten(),
+            nn.Linear(d_model, d_model // 16),
+            nn.GELU(),
+            nn.Linear(d_model // 16, d_model),
+            nn.Sigmoid()
+        )
+        # 深度可分离卷积 + GELU
+        self.spatial_conv = nn.Sequential(
+            nn.Conv1d(d_model, d_model, 3, padding=1, groups=d_model),
+            nn.Conv1d(d_model, d_model, 1),
+            nn.GELU()
+        )
+        self.norm = nn.LayerNorm(d_model)
 
+    def forward(self, noise_x, cond):
+        # 通道融合
+        channel_weights = self.channel_gate(cond.permute(0, 2, 1))  # 输入需调整为 [B,D,L]
+        fused = noise_x * channel_weights.unsqueeze(1)  # [B,L,D] * [B,1,D]
 
+        # 空间融合
+        spatial_out = self.spatial_conv(fused.permute(0, 2, 1)).permute(0, 2, 1)
+        fused = fused + spatial_out
+        return self.norm(fused)
 
 
 class DenoisingConditionDecoder(nn.Module):
-    def __init__(self, embed_dim, num_heads=1,dropout=0.1):
-        super(DenoisingConditionDecoder, self).__init__()
-        self.embed_dim = embed_dim
-        self.num_heads = num_heads
+    def __init__(self, embed_dim, num_heads=4, dropout=0.1):
+        super().__init__()
+        self.fusion = AdaptiveFusion(embed_dim)
+        self.attn = nn.MultiheadAttention(embed_dim, num_heads, dropout=dropout, batch_first=True)
+        self.ff = nn.Sequential(
+            nn.Linear(embed_dim, 4 * embed_dim),
+            nn.GELU(),
+            nn.Linear(4 * embed_dim, embed_dim),
+            nn.Dropout(dropout)
+        )
         self.norm1 = nn.LayerNorm(embed_dim)
         self.norm2 = nn.LayerNorm(embed_dim)
-        self.ff = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim*2),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(embed_dim*2, embed_dim),
-        )
         self.dropout = nn.Dropout(dropout)
-        self.gate = nn.Linear(embed_dim * 2, embed_dim)
-        self.sigmoid = nn.Sigmoid()
 
+    def forward(self, Noise_x, X, cond):
+        # 条件融合
+        fused = self.fusion(Noise_x, cond)
 
+        # 多头注意力
+        attn_output, _ = self.attn(fused, X, X)
+        attn_output = self.dropout(attn_output)
+        attn_output = fused + attn_output
+        attn_output = self.norm1(attn_output)
 
-    def compute_attention(self, q, k, v):
-        scores = torch.matmul(q, k) / torch.sqrt(torch.tensor(q.size(-1)))
-        attn_weights = F.softmax(scores, dim=-1)
-        attn_weights = self.dropout(attn_weights)
-        output = torch.matmul(attn_weights, v)
-        return output, attn_weights
-
-    def forward(self,Noise_x,X,cond):
-
-        # ------------------------------
-        # 融合 Q 和 cond
-        combined = torch.cat([Noise_x, cond], dim=-1)  # [batch_size, seq_len, embed_dim * 2]
-        gate = self.sigmoid(self.gate(combined))  # [batch_size, seq_len, embed_dim]
-        fused = gate * Noise_x + (1 - gate) * cond  # 融合后的表示
-        # ------------------------------
-
-
-        A,B,C,D = Noise_x[0, :, 0], cond[0, :, 0],fused[0,:,0], X[0, :, 0]
-
-        query= fused
-        key = X.permute(0,2,1).contiguous()
-        value = X
-        attn_output,_ = self.compute_attention(query, key, value)
-
-        query = self.norm1(query + self.dropout(attn_output))
-
-        # Feed-forward network
-        ff_output = self.ff(query)
-        output = self.norm2(query + self.dropout(ff_output))
-
-
-        # res0 = torch.stack((A, B,C, D,output[0,:,0]), dim=-1)
-        # df0 = pd.DataFrame(res0.cpu().detach().numpy())  # 先转移到CPU
-        # df0.to_excel('output2.xlsx', index=False, header=False)
-
-
-        return output
-
+        # 前馈网络
+        ff_output = self.ff(attn_output)
+        output = attn_output + ff_output
+        return self.norm2(output)
 
 
 
@@ -408,13 +381,9 @@ class Model(nn.Module):
         self.task_name = configs.task_name
         self.pred_len = configs.pred_len
 
-        self.channel_independence = nn.ModuleList(
-            [ChannelIndependence(
-                input_len=self.input_len // (configs.down_sampling_window ** i),
+        self.channel_independence = ChannelIndependence(
+                input_len=self.input_len,
             )
-                for i in range(configs.down_sampling_layers + 1)
-            ]
-        )
 
 
 
@@ -458,13 +427,6 @@ class Model(nn.Module):
             dropout=configs.dropout,
             num_layers=configs.e_layers,
         )
-        self.encoder_noise = CausalTransformer(
-            d_model=configs.d_model,
-            num_heads=configs.n_heads,
-            feedforward_dim=configs.d_ff,
-            dropout=configs.dropout,
-            num_layers=configs.e_layers,
-        )
 
         # 条件编码模块
         # 假设条件信息维度为 configs.condition_dim
@@ -472,69 +434,27 @@ class Model(nn.Module):
             input_dim=self.d_model,
             d_model=self.d_model
         )
-        # 在 Model 类中替换 ConditionalEncoding
-        # self.conditional_encoding_att = SeqAttention(
-        #     target_dim=self.d_model,
-        #     num_heads=self.num_heads,
-        #     embed_dim=self.d_model,
-        #     dropout=self.dropout,
-        # )
+
+
         # Decoder
         if self.task_name == "pretrain":
-            self.denoising_patch_decoder = DenoisingPatchDecoder(
-                d_model=configs.d_model,
-                num_layers=configs.d_layers,
-                num_heads=configs.n_heads,
-                feedforward_dim=configs.d_ff,
-                dropout=configs.dropout,
-            )
 
 
-            self.projection = nn.ModuleList(
-                [FlattenHead(
-                seq_len=self.seq_len // (configs.down_sampling_window ** i),
+            self.projection =FlattenHead(
+                seq_len=self.seq_len,
                 d_model=self.d_model,
                 pred_len=configs.input_len,
                 dropout=configs.head_dropout,
             )
-                    for i in range(configs.down_sampling_layers + 1)
-                ]
+            self.regression = nn.Linear(self.input_len, self.input_len)
+            self.ff = nn.Sequential(
+                nn.Linear(self.input_len, self.input_len),
+                nn.ReLU(),
+                nn.Linear(self.input_len, self.input_len),
             )
-            self.regression = nn.ModuleList([
-                nn.Linear(self.input_len // (configs.down_sampling_window ** i), self.input_len)
-                for i in range(configs.down_sampling_layers + 1)
-            ])
-            self.regression = nn.ModuleList([
-                nn.Linear(self.input_len, self.input_len)
-                for i in range(configs.down_sampling_layers + 1)
-            ])
-
 
 
         elif self.task_name == "finetune":
-            # self.head = FlattenHead(
-            #     seq_len=self.seq_len,
-            #     d_model=configs.d_model,
-            #     pred_len=configs.pred_len,
-            #     dropout=configs.head_dropout,
-            # )
-
-            self.head = nn.ModuleList(
-                [FlattenHead(
-                    seq_len=self.seq_len // (configs.down_sampling_window ** i),
-                    d_model=self.d_model,
-                    pred_len=configs.pred_len,
-                    dropout=configs.head_dropout,
-                )
-                    for i in range(configs.down_sampling_layers + 1)
-                ]
-            )
-
-            # self.regression = nn.Linear(self.input_len, configs.pred_len)
-            self.regression = nn.ModuleList([
-                nn.Linear(self.input_len // (configs.down_sampling_window ** i), configs.pred_len)
-                for i in range(configs.down_sampling_layers + 1)
-            ])
 
             self.head = FlattenHead(
                     seq_len=self.seq_len,
@@ -544,34 +464,20 @@ class Model(nn.Module):
                 )
 
 
-            self.regression = nn.ModuleList([
-                nn.Linear(self.input_len, configs.pred_len)
-                for i in range(configs.down_sampling_layers + 1)
-            ])
-
-        # 自适应可学习权重参数
-        self.log_var_freq = nn.Parameter(torch.log(torch.tensor(0.1)))
-        self.log_var_orth = nn.Parameter(torch.log(torch.tensor(0.1)))
-        self.log_var_smooth = nn.Parameter(torch.log(torch.tensor(0.1)))
-        self.log_var_season_freq = nn.Parameter(torch.log(torch.tensor(0.1)))
-        self.decomp_multi = series_decomp(95)
-        self.decomp_multi_learnable = StopLearnableMultiScaleDecomp(self.configs.c_out,scales=[95,55,25])
-        self.decomp_multi_learnable_second = StopLearnableMultiScaleDecomp(self.patch_len, scales=[25])
-        self.decomp_multi_learnable_third = StopLearnableMultiScaleDecomp(self.d_model, scales=[25])
-        # self.decomp_multi_learnable = LearnableMultiScaleDecomp(self.configs.c_out)
-        # self.decomp_multi_learnable_second = LearnableMultiScaleDecomp(self.patch_len,scales=[5, 13, 25])
-        # self.decomp_multi_learnable_third = LearnableMultiScaleDecomp(self.d_model,scales=[5, 13, 25])
-        self.denoise_layers_num = configs.denoise_layers_num
-        self.denoise_layers = nn.ModuleList([
-            DenoisingPatchDecoder(
-                d_model=configs.d_model,
-                num_layers=configs.d_layers,
-                num_heads=configs.n_heads,
-                feedforward_dim=configs.d_ff,
-                dropout=configs.dropout,
+            self.regression = nn.Linear(self.input_len, configs.pred_len)
+            self.ff = nn.Sequential(
+                nn.Linear(self.pred_len, self.pred_len),
+                nn.ReLU(),
+                nn.Linear(self.pred_len, self.pred_len),
             )
-            for _ in range(self.denoise_layers_num)
-        ])
+
+
+        self.decomp_multi = series_decomp(25)
+        self.decomp_multi_learnable = LearnableMultiScaleDecomp(self.configs.c_out)
+        self.decomp_multi_learnable_second = LearnableMultiScaleDecomp(self.patch_len,scales=[5, 13, 25])
+        self.decomp_multi_learnable_third = LearnableMultiScaleDecomp(self.d_model,scales=[5, 13, 25])
+        self.denoise_layers_num = configs.denoise_layers_num
+
 
         self.denoise_layers_cond = nn.ModuleList([
             DenoisingConditionDecoder(
@@ -582,16 +488,14 @@ class Model(nn.Module):
             for _ in range(self.denoise_layers_num)
         ])
 
+        # 自适应可学习权重参数
+        self.log_var_freq = nn.Parameter(torch.zeros(1))
+        self.log_var_orth = nn.Parameter(torch.zeros(1))
+        self.log_var_smooth = nn.Parameter(torch.zeros(1))
+
     def pretrain(self, x,x_mask,i=0):
 
         # [batch_size, input_len, num_features]
-        # Instance Normalization
-
-        # x = torch.fft.fft(x,dim=-2).real
-        mask_rate = 0.5
-        lm=3
-        positive_nums=1
-        e_x =x
         batch_size, input_len, num_features = x.size()
         means = torch.mean(
             x, dim=1, keepdim=True
@@ -603,129 +507,66 @@ class Model(nn.Module):
         x = x / stdevs  # [batch_size, input_len, num_features]
 
         # 分解  1
-        x, trend,freq_loss,orth_loss,smoothness,season_freq_loss = self.decomp_multi_learnable(x)
-        # x, trend = self.decomp_multi(x)
-
-        # x, trend = x,x
+        x, trend,freq_loss,orth_loss,smoothness = self.decomp_multi_learnable(x)
         # Channel Independence
-        x = self.channel_independence[0](x)  # [batch_size * num_features, input_len, 1]
-        # Patch
+        x = self.channel_independence(x)  # [batch_size * num_features, input_len, 1]
         x_patch = self.patch(x)  # [batch_size * num_features, seq_len, patch_len]
-        # x_patch_f = torch.fft.fft(x_patch,dim=-2).imag
 
         # For Casual Transformer
         x_embedding = self.enc_embedding(
             x_patch
         )  # [batch_size * num_features, seq_len, d_model]
 
-
-
-
-
         x_embedding_bias = self.add_sos_token_and_drop_last(
             x_embedding
         )  # [batch_size * num_features, seq_len, d_model]
 
-
         x_embedding_bias = self.positional_encoding(x_embedding_bias)
-
-
-        # 分解  2
-        # x_embedding_bias, _ = self.decomp_multi(x_embedding_bias)
-        # x_embedding_bias, _ = x_embedding_bias,x_embedding_bias
 
         x_out = self.encoder(
             x_embedding_bias,
             is_mask=True,
         )  # [batch_size * num_features, seq_len, d_model]
 
+
         freq_loss_inner_list = []
         orth_loss_inner_list = []
         smoothness_inner_list = []
-        season_freq_loss_inner_list = []
-        res_pred = []
         for layer in self.denoise_layers_cond:
-            x = self.channel_independence[0](x)  # [batch_size * num_features, input_len, 1]
-            # Patch
+            x = self.channel_independence(x)  # [batch_size * num_features, input_len, 1]
             x_patch = self.patch(x)  # [batch_size * num_features, seq_len, patch_len]
-
-            # 分解  3
-            # x_patch, default_trend1 = self.decomp_multi_learnable_second(x_patch)
-            # x_patch, default_trend = x_patch,x_patch
 
             noise_x_patch, _, _ = self.diffusion(
                 x_patch
             )  # [batch_size * num_features, seq_len, patch_len]
 
-
             noise_x_embedding = self.enc_embedding(
                 noise_x_patch
             )  # [batch_size * num_features, seq_len, d_model]
             noise_x_embedding = self.positional_encoding(noise_x_embedding)
-            noise_x_embedding_res = noise_x_embedding
             denoise_input = noise_x_embedding
-            # denoise_input = self.encoder_noise(
-            #     noise_x_embedding,
-            #     is_mask=False,
-            # )  # [batch_size * num_features, seq_len, d_model]
-
-            # noise end --------------------------
-            # 分解  4
-            # _, default_trend2 = self.decomp_multi_learnable_third(noise_x_embedding)
-            # noise_x_embedding = noise_x_embedding-default_trend2
-
 
             # 分解  5
-            # noise_x_embedding, _ = noise_x_embedding,noise_x_embedding
-            x_out, x_out_trend,freq_loss_inner,orth_loss_inner,smoothness_inner ,season_freq_loss_inner= self.decomp_multi_learnable_third(x_out)
-            # x_out, x_out_trend = self.decomp_multi(x_out)
-
-            # x_out, x_out_trend = x_out,x_out
-
-            # --------------------------- 添加条件 begin
-            # 获取条件编码
-            # cond_encoded = self.conditional_encoding_att(x_out_trend)  # [batch_size, 1, d_model]
+            x_out, x_out_trend,freq_loss_inner,orth_loss_inner,smoothness_inner = self.decomp_multi_learnable_third(x_out)
             cond_encoded = self.conditional_encoding(x_out_trend)  # [batch_size, 1, d_model]
-            # 扩展条件编码以匹配批次和特征维度
-            # cond_encoded = cond_encoded.repeat_interleave(x_out_trend.size(0) // cond_encoded.size(0),
-            #                                               dim=0)  # [batch_size * num_features, 1, d_model]
-            # cond_encoded = cond_encoded.expand(-1, x_out_trend.size(1), -1)  # [batch_size * num_features, seq_len, d_model]
-
-            # 将条件编码添加到嵌入中
-
-            # --------------------------- 添加条件 end
-
-
             # For Denoising Patch Decoder
             denoise_out = layer(
                 Noise_x=denoise_input,
                 X=x_out,
                 cond=cond_encoded
             )  # [batch_size * num_features, seq_len, d_model]
-
-            # default_trend2_reg = self.trend2_regression(default_trend2.permute(0,2,1)).permute(0,2,1)
-            # denoise_out = denoise_out + default_trend2_reg
-            denoise_out = denoise_out.reshape(
-                batch_size, num_features, -1, self.d_model
-            )  # [batch_size, num_features, seq_len, d_model]
-            denoise_out = self.projection[0](denoise_out)  # [batch_size, input_len, num_features]
-            x = denoise_out
             freq_loss_inner_list.append(freq_loss_inner)
             orth_loss_inner_list.append(orth_loss_inner)
             smoothness_inner_list.append(smoothness_inner)
-            season_freq_loss_inner_list.append(season_freq_loss_inner)
-
-            # predict_x = denoise_out + self.regression[0](trend.permute(0,2,1)).permute(0,2,1).contiguous()
+            # denoise_input = denoise_out+denoise_input  # 增加残差
+            denoise_out = denoise_out.reshape(
+                batch_size, num_features, -1, self.d_model
+            )  # [batch_size, num_features, seq_len, d_model]
+            denoise_out = self.projection(denoise_out)  # [batch_size, input_len, num_features]
+            x = denoise_out
             predict_x = denoise_out
-            # res_pred.append(predict_x)
-        predict_x = predict_x + self.regression[0](trend.permute(0,2,1)).permute(0,2,1).contiguous()
-        # if i % 20 == 0:
-        #     no_trend = [default_trend1,default_trend2,x_patch,noise_x_embedding]
-        #     plot_tensors(no_trend,'notrend',i)
-        #     trend_list = [default_trend1,default_trend2,x_patch,noise_x_embedding,trend]
-        #     plot_tensors(trend_list,'withtrend',i)
-
-
+        predict_x = predict_x + self.regression(trend.permute(0,2,1)).permute(0,2,1).contiguous()
+        # predict_x = self.ff(predict_x.permute(0, 2, 1)).permute(0, 2, 1)
         # Instance Denormalization
         predict_x = predict_x * (stdevs[:, 0, :].unsqueeze(1)).repeat(
             1, input_len, 1
@@ -733,27 +574,13 @@ class Model(nn.Module):
         predict_x = predict_x + (means[:, 0, :].unsqueeze(1)).repeat(
             1, input_len, 1
         )  # [batch_size, input_len, num_features]
-        # predict_x = torch.fft.ifft(predict_x,dim=-2).real
+
         total_freq = freq_loss + sum(freq_loss_inner_list)
         total_orth = orth_loss + sum(orth_loss_inner_list)
         total_smooth = smoothness + sum(smoothness_inner_list)
-        total_season_freq = season_freq_loss + sum(season_freq_loss_inner_list)
-        # return predict_x,0,0,0
-        # return predict_x,total_freq,total_orth,total_smooth,total_season_freq
-        if self.configs.del_orth_loss == 1:
-            total_orth = 0
-        elif self.configs.del_smoothness_loss ==1:
-            total_smooth = 0
-        elif self.configs.del_season_freq_loss == 1:
-            total_season_freq = 0
-        elif self.configs.del_freq_loss ==1:
-            total_freq = 0
-        return predict_x,total_freq,total_orth,total_smooth,total_season_freq
+        return predict_x,total_freq,total_orth,total_smooth
 
     def forecast(self, x,x_mark):
-        # x = torch.fft.fft(x,dim=-2).real
-
-
         batch_size, _, num_features = x.size()
         means = torch.mean(x, dim=1, keepdim=True).detach()
         x = x - means
@@ -761,36 +588,12 @@ class Model(nn.Module):
             torch.var(x, dim=1, keepdim=True, unbiased=False) + 1e-5
         ).detach()
         x = x / stdevs
-        # x, trend = self.decomp_multi(x)
-        x, trend,freq_loss,orth_loss,smoothness,season_freq_loss = self.decomp_multi_learnable(x)
-        # x, trend = x,x
-        x = self.channel_independence[0](x)  # [batch_size * num_features, input_len, 1]
+        x, trend,freq_loss,orth_loss,smoothness = self.decomp_multi_learnable(x)
+        x = self.channel_independence(x)  # [batch_size * num_features, input_len, 1]
         x = self.patch(x)  # [batch_size * num_features, seq_len, patch_len]
-
-        # x = torch.fft.fft(x,dim=-2).imag
         x = self.enc_embedding(x)  # [batch_size * num_features, seq_len, d_model]
 
-
-        # --------------------------- 添加条件 begin
-        # 获取条件编码
-        # cond_encoded = self.conditional_encoding(x)  # [batch_size, 1, d_model]
-        # # 扩展条件编码以匹配批次和特征维度
-        # cond_encoded = cond_encoded.repeat_interleave(x.size(0) // cond_encoded.size(0),
-        #                                               dim=0)  # [batch_size * num_features, 1, d_model]
-        # cond_encoded = cond_encoded.expand(-1, x.size(1), -1)  # [batch_size * num_features, seq_len, d_model]
-        #
-        # # 将条件编码添加到嵌入中
-        # x = x + cond_encoded  # 结合条件编码
-
-        # --------------------------- 添加条件 end
-
-
-
-
         x = self.positional_encoding(x)  # [batch_size * num_features, seq_len, d_model]
-
-        # x, _ = self.decomp_multi(x)
-        # x, _ = x,x
 
         x = self.encoder(
             x,
@@ -799,35 +602,24 @@ class Model(nn.Module):
         x = x.reshape(
             batch_size, num_features, -1, self.d_model
         )  # [batch_size, num_features, seq_len, d_model]
-        # x = torch.fft.ifft(x,dim=-2).real
         # forecast
         x = self.head(x)  # [bs, pred_len, n_vars]
-        x = x + self.regression[0](trend.permute(0, 2, 1)).permute(0, 2, 1).contiguous()
-
+        x = x + self.regression(trend.permute(0, 2, 1)).permute(0, 2, 1).contiguous()
+        # x = self.ff(x.permute(0, 2, 1)).permute(0, 2, 1)
         # denormalization
         x = x * (stdevs[:, 0, :].unsqueeze(1)).repeat(1, self.pred_len, 1)
         x = x + (means[:, 0, :].unsqueeze(1)).repeat(1, self.pred_len, 1)
 
 
-        # return x,freq_loss,orth_loss,smoothness,season_freq_loss
-        if self.configs.del_orth_loss == 1:
-            orth_loss = 0
-        elif self.configs.del_smoothness_loss ==1:
-            smoothness = 0
-        elif self.configs.del_season_freq_loss == 1:
-            season_freq_loss = 0
-        elif self.configs.del_freq_loss ==1:
-            freq_loss = 0
-        return x,freq_loss,orth_loss,smoothness,season_freq_loss
-        # return x,0,0,0
+        return x,freq_loss,orth_loss,smoothness
 
     def forward(self, batch_x,x_mask,i=0):
 
         if self.task_name == "pretrain":
             return self.pretrain(batch_x,x_mask,i)
         elif self.task_name == "finetune":
-            dec_out,freq_loss,orth_loss,smoothness,season_freq_loss = self.forecast(batch_x,x_mask)
-            return dec_out[:, -self.pred_len: , :],freq_loss,orth_loss,smoothness,season_freq_loss
+            dec_out,freq_loss,orth_loss,smoothness = self.forecast(batch_x,x_mask)
+            return dec_out[:, -self.pred_len: , :],freq_loss,orth_loss,smoothness
         else:
             raise ValueError("task_name should be 'pretrain' or 'finetune'")
 

@@ -45,9 +45,9 @@ class Exp_TimeDART(Exp_Basic):
                 self.args.load_checkpoints, model, device=transfer_device
             )
 
-        if torch.cuda.device_count() > 1:
-            print("Let's use", torch.cuda.device_count(), "GPUs!", self.args.device_ids)
-            model = nn.DataParallel(model, device_ids=self.args.device_ids)
+        # if torch.cuda.device_count() > 1:
+        #     print("Let's use", torch.cuda.device_count(), "GPUs!", self.args.device_ids)
+        #     model = nn.DataParallel(model, device_ids=self.args.device_ids)
 
         # print out the model size
         print(
@@ -134,7 +134,7 @@ class Exp_TimeDART(Exp_Basic):
 
                 self.encoder_state_dict = OrderedDict()
                 for k, v in self.model.state_dict().items():
-                    if "encoder" in k or "enc_embedding" in k or "decomp_multi" in k or "decomp_multi_patch" in k:
+                    if "encoder" in k or "enc_embedding" in k or "decomp_multi_learnable" in k or 'log_var_freq' in k or 'log_var_orth' in k or 'log_var_smooth' in k or 'log_var_season_freq' in k:
                         if "module." in k:
                             k = k.replace("module.", "")  # multi-gpu
                         self.encoder_state_dict[k] = v
@@ -149,7 +149,7 @@ class Exp_TimeDART(Exp_Basic):
 
                 self.encoder_state_dict = OrderedDict()
                 for k, v in self.model.state_dict().items():
-                    if "encoder" in k or "enc_embedding" in k or "decomp_multi" in k or "decomp_multi_patch" in k:
+                    if "encoder" in k or "enc_embedding" in k or "decomp_multi_learnable" in k or 'log_var_freq' in k or 'log_var_orth' in k or 'log_var_smooth' in k or 'log_var_season_freq' in k:
                         if "module." in k:
                             k = k.replace("module.", "")
                         self.encoder_state_dict[k] = v
@@ -159,9 +159,12 @@ class Exp_TimeDART(Exp_Basic):
                 }
                 torch.save(encoder_ckpt, os.path.join(path, f"ckpt{epoch + 1}.pth"))
 
+    def get_layer_weight(self,layer_idx, total_layers):
+        return max(0.5, 1.0 - 0.2 * (layer_idx / total_layers))
     def pretrain_one_epoch(self, train_loader, model_optim, model_scheduler):
         train_loss = []
         model_criterion = self._select_criterion()
+        total_epoch = len(train_loader)
 
         self.model.train()
         for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(
@@ -187,13 +190,27 @@ class Exp_TimeDART(Exp_Basic):
                 diff_loss = self.model(batch_x)
                 # diff_loss.requires_grad = True
             # diff_loss = model_criterion(pred_x, batch_x)
+            elif self.args.model == 'TimeDART':
+                pred_x,freq_loss,orth_loss,smoothness,season_freq_loss = self.model(batch_x,batch_x_m,i)
+                # diff_loss = self.model(batch_x)
+                diff_loss = model_criterion(pred_x, batch_x)
+                # 自适应权重计算（不确定权重法）
+                loss_freq = 1 / (2 * torch.exp(self.model.log_var_freq)) * freq_loss
+                loss_orth = 1 / (2 * torch.exp(self.model.log_var_orth)) * orth_loss
+                loss_smooth = 1 / (2 * torch.exp(self.model.log_var_smooth)) * smoothness
+                loss_season_freq = 1 / (2 * torch.exp(self.model.log_var_season_freq)) * season_freq_loss
+
+                # loss_freq = 0.01 * freq_loss
+                # loss_orth = 0.1 * orth_loss
+                # loss_smooth = 0.1 * smoothness
+                diff_loss = diff_loss + loss_freq  + loss_orth + loss_smooth +loss_season_freq
+
             else:
-                pred_x = self.model(batch_x,batch_x_m,i)
+                pred_x, = self.model(batch_x,batch_x_m,i)
                 # diff_loss = self.model(batch_x)
                 diff_loss = model_criterion(pred_x, batch_x)
             # diff_loss.requires_grad = True
             diff_loss.backward()
-
             model_optim.step()
             train_loss.append(diff_loss.item())
 
@@ -227,6 +244,19 @@ class Exp_TimeDART(Exp_Basic):
                     # pred_x = self.model(batch_x)
                     diff_loss = self.model(batch_x)
                 # diff_loss = model_criterion(pred_x, batch_x)
+                elif self.args.model == 'TimeDART':
+                    pred_x, freq_loss, orth_loss, smoothness,season_freq_loss = self.model(batch_x, batch_x_m, i)
+                    # diff_loss = self.model(batch_x)
+                    diff_loss = model_criterion(pred_x, batch_x)
+                    loss_freq = 1 / (2 * torch.exp(self.model.log_var_freq)) * freq_loss
+                    loss_orth = 1 / (2 * torch.exp(self.model.log_var_orth)) * orth_loss
+                    loss_smooth = 1 / (2 * torch.exp(self.model.log_var_smooth)) * smoothness
+                    loss_season_freq = 1 / (2 * torch.exp(self.model.log_var_season_freq)) * season_freq_loss
+                    # 自适应权重计算（不确定权重法）
+                    # loss_freq = 0.5 / (self.model.log_var_freq.exp()) * freq_loss + 0.5 * self.model.log_var_freq
+                    # loss_orth = 0.5 / (self.model.log_var_orth.exp()) * orth_loss + 0.5 * self.model.log_var_orth
+                    # loss_smooth = 0.5 / (self.model.log_var_smooth.exp()) * smoothness + 0.5 * self.model.log_var_smooth
+                    diff_loss = diff_loss + loss_freq + loss_orth + loss_smooth + loss_season_freq
                 else:
                     pred_x = self.model(batch_x,batch_x_m)
                     # diff_loss = self.model(batch_x)
@@ -283,14 +313,24 @@ class Exp_TimeDART(Exp_Basic):
                 batch_y = batch_y.float().to(self.device)
                 batch_x_mark = batch_x_mark.float().to(self.device)
 
-                pred_x = self.model(batch_x,batch_x_mark)
+                pred_x, freq_loss, orth_loss, smoothness,season_freq_loss = self.model(batch_x,batch_x_mark)
 
+                # 自适应权重计算（不确定权重法）
+                loss_freq = 1/(2*torch.exp(self.model.log_var_freq)) * freq_loss
+                loss_orth = 1/(2*torch.exp(self.model.log_var_orth)) * orth_loss
+                loss_smooth = 1/(2*torch.exp(self.model.log_var_smooth)) * smoothness
+                loss_season_freq = 1/(2*torch.exp(self.model.log_var_season_freq)) * season_freq_loss
+                # loss_freq = 0.01 * freq_loss
+                # loss_orth = 0.1 * orth_loss
+                # loss_smooth = 0.1 * smoothness
                 f_dim = -1 if self.args.features == "MS" else 0
 
                 pred_x = pred_x[:, -self.args.pred_len :, f_dim:]
                 batch_y = batch_y[:, -self.args.pred_len :, f_dim:]
 
                 loss = model_criteria(pred_x, batch_y)
+
+                loss = loss + loss_freq + loss_orth + loss_smooth + loss_season_freq
                 loss.backward()
                 model_optim.step()
                 if self.args.lradj == "step":
@@ -358,7 +398,11 @@ class Exp_TimeDART(Exp_Basic):
                 batch_y = batch_y.float().to(self.device)
                 batch_x_mark = batch_x_mark.float().to(self.device)
 
-                pred_x = self.model(batch_x,batch_x_mark)
+                pred_x, freq_loss, orth_loss, smoothness ,season_freq_loss= self.model(batch_x,batch_x_mark)
+                # 自适应权重计算（不确定权重法）
+                # loss_freq = 0.5 / (self.model.log_var_freq.exp()) * freq_loss + 0.5 * self.model.log_var_freq
+                # loss_orth = 0.5 / (self.model.log_var_orth.exp()) * orth_loss + 0.5 * self.model.log_var_orth
+                # loss_smooth = 0.5 / (self.model.log_var_smooth.exp()) * smoothness + 0.5 * self.model.log_var_smooth
 
                 f_dim = -1 if self.args.features == "MS" else 0
 
@@ -369,6 +413,7 @@ class Exp_TimeDART(Exp_Basic):
                 true = batch_y.detach().cpu()
 
                 loss = model_criteria(pred_x, batch_y)
+                # loss = loss + + loss_freq + loss_orth + loss_smooth
                 vali_loss.append(loss.item())
 
         vali_loss = np.mean(vali_loss)
@@ -397,8 +442,11 @@ class Exp_TimeDART(Exp_Basic):
 
                 batch_x_mark = batch_x_mark.float().to(self.device)
 
-                pred_x = self.model(batch_x,batch_x_mark)
-
+                pred_x,freq_loss, orth_loss, smoothness,season_freq_loss = self.model(batch_x,batch_x_mark)
+                # 自适应权重计算（不确定权重法）
+                # loss_freq = 0.5 / (self.model.log_var_freq.exp()) * freq_loss + 0.5 * self.model.log_var_freq
+                # loss_orth = 0.5 / (self.model.log_var_orth.exp()) * orth_loss + 0.5 * self.model.log_var_orth
+                # loss_smooth = 0.5 / (self.model.log_var_smooth.exp()) * smoothness + 0.5 * self.model.log_var_smooth
                 f_dim = -1 if self.args.features == "MS" else 0
 
                 pred_x = pred_x[:, -self.args.pred_len :, f_dim:]
@@ -435,9 +483,17 @@ class Exp_TimeDART(Exp_Basic):
             )
         )
         f = open(folder_path + "/score.txt", "a")
+        from datetime import datetime
+
+        # 获取当前时间
+        now = datetime.now()
+
+        # 方式1：标准格式化输出（示例：2023-10-25 15:30:45）
+        formatted_time = now.strftime("%Y-%m-%d %H:%M:%S")
+        # print("当前时间:", formatted_time)
         f.write(
-            "{0}->{1}, {2:.3f}, {3:.3f} \n".format(
-                self.args.input_len, self.args.pred_len, mse, mae
+            "{0}->{1}, {2:.3f}, {3:.3f},{4} \n".format(
+                self.args.input_len, self.args.pred_len, mse, mae,formatted_time
             )
         )
         f.close()

@@ -205,6 +205,14 @@ parser.add_argument('--seq_len', type=int, default=96, help='seq_len')
 parser.add_argument('--denoise_layers_num', type=int, default=3, help='denoise_layers_num')
 parser.add_argument('--inverse', action='store_true', help='inverse output data', default=False)
 
+
+# loss
+parser.add_argument('--del_orth_loss',type=int,help='del_orth_loss', default=0)
+parser.add_argument('--del_season_freq_loss', type=int, help='del_season_freq_loss', default=0)
+parser.add_argument('--del_smoothness_loss',type=int,help='del_smoothness_loss', default=0)
+parser.add_argument('--del_freq_loss', type=int, help='del_freq_loss', default=0)
+
+
 args = parser.parse_args()
 args.use_gpu = True if torch.cuda.is_available() and args.use_gpu else False
 a = torch.cuda.is_available()

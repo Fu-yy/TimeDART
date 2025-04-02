@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 from einops import rearrange, repeat
 import pandas as pd
-from scipy.signal import find_peaks
 
 from layers.Autoformer_EncDec import moving_avg, series_decomp
 from layers.Transformer_EncDec import Decoder, DecoderLayer, Encoder, EncoderLayer
@@ -26,145 +25,6 @@ import matplotlib.pyplot as plt
 # 只保留15分解，用新的分解策略
 
 
-def calculate_scales_optimized(data, num_scales=3, max_lag=63, peak_threshold=0.3):
-    """完全基于PyTorch的优化实现"""
-    # 数据预处理 [B, L, C] -> [B, C, L]
-    x = data.permute(0, 2, 1)
-    B, C, L = x.shape
-
-    # 批标准化
-    x_mean = x.mean(dim=2, keepdim=True)
-    x_centered = x - x_mean
-    x_norm = x_centered / (x_centered.std(dim=2, keepdim=True) + 1e-8)
-
-    # FFT加速自相关计算
-    pad_size = L
-    x_padded = torch.nn.functional.pad(x_norm, (0, pad_size))
-    fft_x = torch.fft.rfft(x_padded, dim=2)
-    acf = torch.fft.irfft(fft_x * fft_x.conj(), dim=2)[..., :L]
-    acf = acf / (acf[..., :1] + 1e-8)
-
-    # 聚合所有通道和批次
-    mean_acf = acf.mean(dim=(0, 1))  # [L]
-
-    # 峰值检测（PyTorch实现）
-    # peaks = find_peaks_torch(
-    #     mean_acf[:max_lag],
-    #     height=peak_threshold,
-    #     distance=10,
-    #     max_num=num_scales * 2
-    # )
-
-    peaks, _ = find_peaks(mean_acf[:max_lag],
-                          height=peak_threshold,
-                          distance=10)
-
-    # 选择主要尺度
-    if len(peaks) == 0:
-        return [15, 31, 63][:num_scales]
-
-    # 密度估计选择
-    hist = torch.histc(
-        peaks.float(),
-        bins=max_lag,
-        min=0,
-        max=max_lag - 1
-    )
-    scales = []
-    for _ in range(num_scales):
-        max_bin = hist.argmax()
-        if hist[max_bin] == 0:
-            break
-        scales.append(max_bin.item())
-        hist[max(0, max_bin - 5):max_bin + 6] = 0
-
-    # 确保奇数尺寸
-    return sorted([s if s % 2 else s + 1 for s in scales[:num_scales]])
-
-
-class FixedMultiScaleConv(nn.Module):
-    def __init__(self, nvar, scales=[15, 31, 63]):
-        super().__init__()
-        self.conv_layers = nn.ModuleList([
-            nn.Conv1d(nvar, nvar, kernel_size=k, padding=(k - 1) // 2,
-                      groups=nvar, bias=False)
-            for k in scales
-        ])
-        # 固定为均值滤波且不更新权重
-        for conv in self.conv_layers:
-            conv.weight.data = torch.ones_like(conv.weight) / conv.kernel_size[0]
-            conv.weight.requires_grad = False
-
-    def forward(self, x):
-        return [conv(x) for conv in self.conv_layers]
-
-
-class LightWeightGenerator(nn.Module):
-    def __init__(self, nvar, num_scales):
-        super().__init__()
-        self.nvar = nvar
-        self.num_scales = num_scales
-        self.gen = nn.Sequential(
-            nn.AdaptiveAvgPool1d(1),  # [B,C,1]
-            nn.Flatten(start_dim=1),  # [B,C]
-            nn.Linear(nvar, nvar * num_scales),  # [B, C*K]
-            nn.Unflatten(-1, (nvar, num_scales)),  # [B,C,K]
-            nn.Softmax(dim=-1)  # 沿尺度维度归一化
-        )
-
-    def forward(self, x):
-        weights = self.gen(x)  # [B,C,K]
-        return weights.unsqueeze(-1)  # [B,C,K,1]
-
-
-class StopLearnableMultiScaleDecomp(nn.Module):
-    def __init__(self, nvar, scales=[15, 31, 63]):
-        super().__init__()
-        self.nvar = nvar
-        self.scales = scales
-        self.num_scales = len(scales)
-
-        # 多尺度卷积组（固定参数）
-        self.fixed_convs = FixedMultiScaleConv(nvar, scales)
-
-        # 轻量权重生成器
-        self.weight_gen = LightWeightGenerator(nvar, self.num_scales)
-        # self.local_encoder = nn.Conv1d(nvar, nvar, 3, padding=1, groups=nvar)
-    def forward(self, x):
-        # 输入形状: [Batch, Length, Channels]
-        B, L, C = x.shape
-        x = x.permute(0, 2, 1)  # [B, C, L]
-        # x_local = self.local_encoder(x.permute(0, 2, 1))  # 捕捉局部模式
-        # x = 0.8 * x.permute(0, 2, 1) + 0.2 * x_local  # 特征融合
-        # 多尺度趋势提取
-        trends = self.fixed_convs(x)  # list of [B,C,L]
-        trends = torch.stack(trends, dim=-1)  # [B,C,L,K]
-
-        # 生成融合权重
-        weights = self.weight_gen(x)  # [B,C,K,1]
-        weights = weights.permute(0,1,3,2)
-        # 加权融合（广播机制）
-        fused_trend = (trends * weights).sum(dim=-1)  # [B,C,L]
-
-        # 季节项
-        seasonal = x - fused_trend
-
-        # 频域约束（抑制高频）
-        trend_fft = torch.fft.rfft(fused_trend, dim=-1)
-        freq_loss = torch.mean(torch.abs(trend_fft[..., 2:]))  # 忽略前5个低频
-
-        # 平滑性约束
-        smooth_loss = torch.mean(torch.diff(fused_trend, n=2, dim=-1) ** 2)
-
-        # 正交约束
-        orth_loss = torch.mean((seasonal * fused_trend).sum(dim=-1) ** 2)
-
-        # total_loss = freq_loss + 0.1 * smooth_loss + 0.1 * orth_loss
-        # 季节项高频激励（可选）
-        seasonal_fft = torch.fft.rfft(seasonal, dim=2)  # [B,C, L//2+1]
-        season_freq_loss = -torch.mean(torch.abs(seasonal_fft[..., 5:]))  # 激励高频
-
-        return seasonal.permute(0, 2, 1), fused_trend.permute(0, 2, 1), freq_loss,orth_loss,smooth_loss,season_freq_loss
 def plot_tensors(tensor_list,file_name,index):
     project_path = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
     fig_path = project_path + os.sep + 'trend_figs'
@@ -458,13 +318,6 @@ class Model(nn.Module):
             dropout=configs.dropout,
             num_layers=configs.e_layers,
         )
-        self.encoder_noise = CausalTransformer(
-            d_model=configs.d_model,
-            num_heads=configs.n_heads,
-            feedforward_dim=configs.d_ff,
-            dropout=configs.dropout,
-            num_layers=configs.e_layers,
-        )
 
         # 条件编码模块
         # 假设条件信息维度为 configs.condition_dim
@@ -549,18 +402,11 @@ class Model(nn.Module):
                 for i in range(configs.down_sampling_layers + 1)
             ])
 
-        # 自适应可学习权重参数
-        self.log_var_freq = nn.Parameter(torch.log(torch.tensor(0.1)))
-        self.log_var_orth = nn.Parameter(torch.log(torch.tensor(0.1)))
-        self.log_var_smooth = nn.Parameter(torch.log(torch.tensor(0.1)))
-        self.log_var_season_freq = nn.Parameter(torch.log(torch.tensor(0.1)))
-        self.decomp_multi = series_decomp(95)
-        self.decomp_multi_learnable = StopLearnableMultiScaleDecomp(self.configs.c_out,scales=[95,55,25])
-        self.decomp_multi_learnable_second = StopLearnableMultiScaleDecomp(self.patch_len, scales=[25])
-        self.decomp_multi_learnable_third = StopLearnableMultiScaleDecomp(self.d_model, scales=[25])
-        # self.decomp_multi_learnable = LearnableMultiScaleDecomp(self.configs.c_out)
-        # self.decomp_multi_learnable_second = LearnableMultiScaleDecomp(self.patch_len,scales=[5, 13, 25])
-        # self.decomp_multi_learnable_third = LearnableMultiScaleDecomp(self.d_model,scales=[5, 13, 25])
+
+        self.decomp_multi = series_decomp(25)
+        self.decomp_multi_learnable = LearnableMultiScaleDecomp(self.configs.c_out)
+        self.decomp_multi_learnable_second = LearnableMultiScaleDecomp(self.patch_len,scales=[5, 13, 25])
+        self.decomp_multi_learnable_third = LearnableMultiScaleDecomp(self.d_model,scales=[5, 13, 25])
         self.denoise_layers_num = configs.denoise_layers_num
         self.denoise_layers = nn.ModuleList([
             DenoisingPatchDecoder(
@@ -603,8 +449,7 @@ class Model(nn.Module):
         x = x / stdevs  # [batch_size, input_len, num_features]
 
         # 分解  1
-        x, trend,freq_loss,orth_loss,smoothness,season_freq_loss = self.decomp_multi_learnable(x)
-        # x, trend = self.decomp_multi(x)
+        x, trend,freq_loss,orth_loss,smoothness = self.decomp_multi_learnable(x)
 
         # x, trend = x,x
         # Channel Independence
@@ -639,10 +484,8 @@ class Model(nn.Module):
             is_mask=True,
         )  # [batch_size * num_features, seq_len, d_model]
 
-        freq_loss_inner_list = []
-        orth_loss_inner_list = []
-        smoothness_inner_list = []
-        season_freq_loss_inner_list = []
+
+
         res_pred = []
         for layer in self.denoise_layers_cond:
             x = self.channel_independence[0](x)  # [batch_size * num_features, input_len, 1]
@@ -663,12 +506,6 @@ class Model(nn.Module):
             )  # [batch_size * num_features, seq_len, d_model]
             noise_x_embedding = self.positional_encoding(noise_x_embedding)
             noise_x_embedding_res = noise_x_embedding
-            denoise_input = noise_x_embedding
-            # denoise_input = self.encoder_noise(
-            #     noise_x_embedding,
-            #     is_mask=False,
-            # )  # [batch_size * num_features, seq_len, d_model]
-
             # noise end --------------------------
             # 分解  4
             # _, default_trend2 = self.decomp_multi_learnable_third(noise_x_embedding)
@@ -677,9 +514,7 @@ class Model(nn.Module):
 
             # 分解  5
             # noise_x_embedding, _ = noise_x_embedding,noise_x_embedding
-            x_out, x_out_trend,freq_loss_inner,orth_loss_inner,smoothness_inner ,season_freq_loss_inner= self.decomp_multi_learnable_third(x_out)
-            # x_out, x_out_trend = self.decomp_multi(x_out)
-
+            x_out, x_out_trend,freq_loss,orth_loss,smoothness = self.decomp_multi_learnable_third(x_out)
             # x_out, x_out_trend = x_out,x_out
 
             # --------------------------- 添加条件 begin
@@ -698,7 +533,7 @@ class Model(nn.Module):
 
             # For Denoising Patch Decoder
             denoise_out = layer(
-                Noise_x=denoise_input,
+                Noise_x=noise_x_embedding,
                 X=x_out,
                 cond=cond_encoded
             )  # [batch_size * num_features, seq_len, d_model]
@@ -710,10 +545,7 @@ class Model(nn.Module):
             )  # [batch_size, num_features, seq_len, d_model]
             denoise_out = self.projection[0](denoise_out)  # [batch_size, input_len, num_features]
             x = denoise_out
-            freq_loss_inner_list.append(freq_loss_inner)
-            orth_loss_inner_list.append(orth_loss_inner)
-            smoothness_inner_list.append(smoothness_inner)
-            season_freq_loss_inner_list.append(season_freq_loss_inner)
+
 
             # predict_x = denoise_out + self.regression[0](trend.permute(0,2,1)).permute(0,2,1).contiguous()
             predict_x = denoise_out
@@ -734,21 +566,8 @@ class Model(nn.Module):
             1, input_len, 1
         )  # [batch_size, input_len, num_features]
         # predict_x = torch.fft.ifft(predict_x,dim=-2).real
-        total_freq = freq_loss + sum(freq_loss_inner_list)
-        total_orth = orth_loss + sum(orth_loss_inner_list)
-        total_smooth = smoothness + sum(smoothness_inner_list)
-        total_season_freq = season_freq_loss + sum(season_freq_loss_inner_list)
-        # return predict_x,0,0,0
-        # return predict_x,total_freq,total_orth,total_smooth,total_season_freq
-        if self.configs.del_orth_loss == 1:
-            total_orth = 0
-        elif self.configs.del_smoothness_loss ==1:
-            total_smooth = 0
-        elif self.configs.del_season_freq_loss == 1:
-            total_season_freq = 0
-        elif self.configs.del_freq_loss ==1:
-            total_freq = 0
-        return predict_x,total_freq,total_orth,total_smooth,total_season_freq
+
+        return predict_x
 
     def forecast(self, x,x_mark):
         # x = torch.fft.fft(x,dim=-2).real
@@ -761,8 +580,7 @@ class Model(nn.Module):
             torch.var(x, dim=1, keepdim=True, unbiased=False) + 1e-5
         ).detach()
         x = x / stdevs
-        # x, trend = self.decomp_multi(x)
-        x, trend,freq_loss,orth_loss,smoothness,season_freq_loss = self.decomp_multi_learnable(x)
+        x, trend,freq_loss,orth_loss,smoothness = self.decomp_multi_learnable(x)
         # x, trend = x,x
         x = self.channel_independence[0](x)  # [batch_size * num_features, input_len, 1]
         x = self.patch(x)  # [batch_size * num_features, seq_len, patch_len]
@@ -809,25 +627,15 @@ class Model(nn.Module):
         x = x + (means[:, 0, :].unsqueeze(1)).repeat(1, self.pred_len, 1)
 
 
-        # return x,freq_loss,orth_loss,smoothness,season_freq_loss
-        if self.configs.del_orth_loss == 1:
-            orth_loss = 0
-        elif self.configs.del_smoothness_loss ==1:
-            smoothness = 0
-        elif self.configs.del_season_freq_loss == 1:
-            season_freq_loss = 0
-        elif self.configs.del_freq_loss ==1:
-            freq_loss = 0
-        return x,freq_loss,orth_loss,smoothness,season_freq_loss
-        # return x,0,0,0
+        return x
 
     def forward(self, batch_x,x_mask,i=0):
 
         if self.task_name == "pretrain":
             return self.pretrain(batch_x,x_mask,i)
         elif self.task_name == "finetune":
-            dec_out,freq_loss,orth_loss,smoothness,season_freq_loss = self.forecast(batch_x,x_mask)
-            return dec_out[:, -self.pred_len: , :],freq_loss,orth_loss,smoothness,season_freq_loss
+            dec_out = self.forecast(batch_x,x_mask)
+            return dec_out[:, -self.pred_len: , :]
         else:
             raise ValueError("task_name should be 'pretrain' or 'finetune'")
 
