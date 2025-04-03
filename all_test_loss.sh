@@ -61,7 +61,7 @@ fi
 del_orth_loss=0
 del_season_freq_loss=1
 del_smoothness_loss=0
-del_freq_loss=0
+del_freq_loss=1
 
 
 denoise_layers_num=1
