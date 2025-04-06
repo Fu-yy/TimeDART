@@ -789,9 +789,9 @@ class Model(nn.Module):
         season_freq_loss_inner_list = []
         res_pred = []
         for layer in self.denoise_layers_cond:
-            # x = self.channel_independence[0](x)  # [batch_size * num_features, input_len, 1]
-            # # Patch
-            # x_patch = self.patch(x)  # [batch_size * num_features, seq_len, patch_len]
+            x = self.channel_independence[0](x)  # [batch_size * num_features, input_len, 1]
+            # Patch
+            x_patch = self.patch(x)  # [batch_size * num_features, seq_len, patch_len]
 
             # 分解  3
             # x_patch, default_trend1 = self.decomp_multi_learnable_second(x_patch)
