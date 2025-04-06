@@ -117,11 +117,11 @@ def find_peaks_torch(acf, height, distance=10, max_num=6):
             if len(selected) >= max_num:
                 break
     return torch.tensor(selected, device=acf.device, dtype=torch.long)
-def calculate_scales_optimized_toech(data, num_scales=3, max_lag=63, peak_threshold=0.3,distance=10):
+def calculate_scales_optimized_toech(data,init_conv_kernel=[15, 31, 63,95], num_scales=3, max_lag=63, peak_threshold=0.3,distance=10):
     # 数据预处理 [B, L, C] -> [B, C, L]
     x = data.permute(0, 2, 1).contiguous()
     B, C, L = x.shape
-    # max_lag = min(max_lag, L - 1)
+    max_lag = min(max_lag, L - 1)
     # 批标准化
     x_mean = x.mean(dim=2, keepdim=True)
     x_centered = x - x_mean
@@ -137,17 +137,26 @@ def calculate_scales_optimized_toech(data, num_scales=3, max_lag=63, peak_thresh
     # 聚合所有通道和批次
     mean_acf = acf.mean(dim=(0, 1))  # [L]
 
+    # # GPU峰值检测（替换SciPy）
+    # peaks = find_peaks_torch(
+    #     mean_acf[:max_lag],
+    #     height=peak_threshold,
+    #     distance=distance,
+    #     max_num=num_scales * 2
+    # )
+    # peaks += 1  # 滞后值修正
+
     # GPU峰值检测（替换SciPy）
     peaks = find_peaks_torch(
-        mean_acf[:max_lag],
+        mean_acf[1:max_lag],
         height=peak_threshold,
         distance=distance,
         max_num=num_scales * 2
     )
-
+    peaks += 1  # 滞后值修正
     # 选择主要尺度
     if len(peaks) == 0:
-        return [15, 31, 63,95][:num_scales]
+        return init_conv_kernel[:num_scales]
 
     # 密度估计选择（向量化优化）
     hist = torch.histc(peaks.float(), bins=max_lag, min=0, max=max_lag - 1)
@@ -165,7 +174,7 @@ def calculate_scales_optimized_toech(data, num_scales=3, max_lag=63, peak_thresh
     last_scales = [s if s % 2 else s + 1 for s in scales[:num_scales]]
     # 补足长度
     if len(scales) < num_scales:
-        default_scales = [15, 31, 63,95]
+        default_scales = init_conv_kernel
         for s in default_scales:
             if s not in last_scales:
                 last_scales.append(s)
@@ -212,7 +221,7 @@ class LightWeightGenerator(nn.Module):
 
 
 class StopLearnableMultiScaleDecomp(nn.Module):
-    def __init__(self, nvar,num_scales,peak_threshold,distance):
+    def __init__(self, nvar,num_scales,max_lag,peak_threshold,distance):
         super().__init__()
         self.nvar = nvar
         # 延迟初始化的组件
@@ -221,7 +230,7 @@ class StopLearnableMultiScaleDecomp(nn.Module):
         self.fixed_convs = None  # 将在第一次forward时初始化
         self.scales = None  # 保存计算得到的scales
         self.num_scales = num_scales
-
+        self.max_lag = max_lag
         # 多尺度卷积组（固定参数）
         # self.fixed_convs = FixedMultiScaleConv(nvar, scales)
 
@@ -244,8 +253,8 @@ class StopLearnableMultiScaleDecomp(nn.Module):
                     x,
                     num_scales=self.num_scales,
                     distance=self.distance,
-                    peak_threshold=self.peak_threshold
-                    # max_lag=self.max_lag,
+                    peak_threshold=self.peak_threshold,
+                    max_lag=self.max_lag,
                     # peak_threshold=self.peak_threshold
                 )
 
@@ -690,9 +699,9 @@ class Model(nn.Module):
         self.log_var_smooth = nn.Parameter(torch.log(torch.tensor(0.1)))
         self.log_var_season_freq = nn.Parameter(torch.log(torch.tensor(0.1)))
         self.decomp_multi = series_decomp(95)
-        self.decomp_multi_learnable = StopLearnableMultiScaleDecomp(self.configs.c_out,num_scales=4,peak_threshold=0.3,distance=10)
+        self.decomp_multi_learnable = StopLearnableMultiScaleDecomp(self.configs.c_out,max_lag=63,num_scales=4,peak_threshold=0.3,distance=10)
         # self.decomp_multi_learnable_second = StopLearnableMultiScaleDecomp(self.patch_len,num_scales=4)
-        self.decomp_multi_learnable_third = StopLearnableMultiScaleDecomp(self.d_model, num_scales=4,peak_threshold=0.2,distance=5)
+        self.decomp_multi_learnable_third = StopLearnableMultiScaleDecomp(self.d_model, max_lag=31,num_scales=4,peak_threshold=0.1,distance=3)
         # self.decomp_multi_learnable = LearnableMultiScaleDecomp(self.configs.c_out)
         # self.decomp_multi_learnable_second = LearnableMultiScaleDecomp(self.patch_len,scales=[5, 13, 25])
         # self.decomp_multi_learnable_third = LearnableMultiScaleDecomp(self.d_model,scales=[5, 13, 25])
@@ -780,9 +789,9 @@ class Model(nn.Module):
         season_freq_loss_inner_list = []
         res_pred = []
         for layer in self.denoise_layers_cond:
-            x = self.channel_independence[0](x)  # [batch_size * num_features, input_len, 1]
-            # Patch
-            x_patch = self.patch(x)  # [batch_size * num_features, seq_len, patch_len]
+            # x = self.channel_independence[0](x)  # [batch_size * num_features, input_len, 1]
+            # # Patch
+            # x_patch = self.patch(x)  # [batch_size * num_features, seq_len, patch_len]
 
             # 分解  3
             # x_patch, default_trend1 = self.decomp_multi_learnable_second(x_patch)

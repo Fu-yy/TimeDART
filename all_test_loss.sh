@@ -64,7 +64,7 @@ del_smoothness_loss=0
 del_freq_loss=1
 
 
-denoise_layers_num=1
+denoise_layers_num=2
 
 #
 #
@@ -151,7 +151,7 @@ done
 
 # ETTh2
 
-denoise_layers_num=1
+denoise_layers_num=2
 echo "ETTh2 $denoise_layers_num "
 
 python -u run.py \
@@ -241,7 +241,7 @@ done
 
 
 # ETTm1
-denoise_layers_num=1
+denoise_layers_num=2
 echo "ETTm1 $denoise_layers_num "
 
 python -u run.py \
@@ -333,7 +333,7 @@ done
 
 
 ##ETTm2
-denoise_layers_num=1
+denoise_layers_num=2
 echo "ETTm2 $denoise_layers_num "
 
 python -u run.py \
