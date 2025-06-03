@@ -73,11 +73,13 @@ del_orth_loss=0
 del_season_freq_loss=0
 del_smoothness_loss=0
 del_freq_loss=0
+del_recon_loss=0
 
-log_var_freq=1.0
-log_var_orth=1000.0
-log_var_smooth=0.001
-log_var_season_freq=5.0
+log_var_freq=0.2
+log_var_orth=6.0
+log_var_smooth=1.0
+log_var_season_freq=4.0
+log_var_recon=0.1
 
 for denoise_layers_num in 1 2 3 4 5 6 7 8;do
 
@@ -116,13 +118,16 @@ python -u run.py \
     --del_season_freq_loss $del_season_freq_loss \
     --del_smoothness_loss $del_smoothness_loss \
     --del_freq_loss $del_freq_loss \
+    --del_recon_loss $del_recon_loss \
+    --log_var_recon $log_var_recon \
     --log_var_freq $log_var_freq \
     --log_var_orth $log_var_orth \
     --log_var_smooth $log_var_smooth \
     --log_var_season_freq $log_var_season_freq \
     --down_sampling_layer 2 \
     --down_sampling_window 2 \
-> ./run_log/log_202506022128_win/Exchange/'TimeDART_pretrain'0.01.log 2>&1
+> ./run_log/log_202506022128_win/Exchange/'TimeDART_pretrain_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
+
 
 for pred_len in 96 192 336 720; do
 echo "Exchange $denoise_layers_num _ $pred_len"
@@ -160,6 +165,8 @@ echo "Exchange $denoise_layers_num _ $pred_len"
         --del_season_freq_loss $del_season_freq_loss \
         --del_smoothness_loss $del_smoothness_loss \
         --del_freq_loss $del_freq_loss \
+        --del_recon_loss $del_recon_loss \
+        --log_var_recon $log_var_recon \
         --log_var_freq $log_var_freq \
         --log_var_orth $log_var_orth \
         --log_var_smooth $log_var_smooth \
@@ -169,14 +176,24 @@ echo "Exchange $denoise_layers_num _ $pred_len"
         --pct_start 0.3 \
        --down_sampling_layer 2 \
        --down_sampling_window 2 \
-> ./run_log/log_202506022128_win/Exchange/'TimeDART_finetune'$pred_len'_'$denoise_layers_num'_'0.01.log 2>&1
+> ./run_log/log_202506022128_win/Exchange/'TimeDART_finetune'$pred_len'_'$denoise_layers_num'_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
 
 done
 
 
 
 
+del_orth_loss=0
+del_season_freq_loss=0
+del_smoothness_loss=0
+del_freq_loss=0
+del_recon_loss=0
 
+log_var_freq=0.2
+log_var_orth=6.0
+log_var_smooth=1.0
+log_var_season_freq=4.0
+log_var_recon=0.1
 ##ecl
 #
 echo "ECL $denoise_layers_num "
@@ -211,6 +228,8 @@ python -u run.py \
     --del_season_freq_loss $del_season_freq_loss \
     --del_smoothness_loss $del_smoothness_loss \
     --del_freq_loss $del_freq_loss \
+    --del_recon_loss $del_recon_loss \
+    --log_var_recon $log_var_recon \
     --log_var_freq $log_var_freq \
     --log_var_orth $log_var_orth \
     --log_var_smooth $log_var_smooth \
@@ -219,7 +238,7 @@ python -u run.py \
     --down_sampling_layer 2 \
     --down_sampling_window 2 \
     --train_epochs 50 \
-> ./run_log/log_202506022128_win/electricity/'TimeDART_pretrain'0.01.log 2>&1
+> ./run_log/log_202506022128_win/electricity/'TimeDART_pretrain_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
 
 for pred_len in 96 192 336 720; do
 echo "ECL $denoise_layers_num _ $pred_len"
@@ -255,6 +274,8 @@ echo "ECL $denoise_layers_num _ $pred_len"
         --del_season_freq_loss $del_season_freq_loss \
         --del_smoothness_loss $del_smoothness_loss \
         --del_freq_loss $del_freq_loss \
+        --del_recon_loss $del_recon_loss \
+        --log_var_recon $log_var_recon \
         --log_var_freq $log_var_freq \
         --log_var_orth $log_var_orth \
         --log_var_smooth $log_var_smooth \
@@ -265,12 +286,22 @@ echo "ECL $denoise_layers_num _ $pred_len"
         --down_sampling_layer 2 \
         --down_sampling_window 2 \
         --pct_start 0.3 \
-> ./run_log/log_202506022128_win/electricity/'TimeDART_finetune'$pred_len'_'$denoise_layers_num'_'0.01.log 2>&1
+> ./run_log/log_202506022128_win/electricity/'TimeDART_finetune'$pred_len'_'$denoise_layers_num'_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
 
 done
 
 
+del_orth_loss=0
+del_season_freq_loss=0
+del_smoothness_loss=0
+del_freq_loss=0
+del_recon_loss=0
 
+log_var_freq=0.2
+log_var_orth=6.0
+log_var_smooth=1.0
+log_var_season_freq=4.0
+log_var_recon=0.1
 #Traffic
 echo "Traffic $denoise_layers_num "
 
@@ -305,6 +336,8 @@ python -u run.py \
     --del_season_freq_loss $del_season_freq_loss \
     --del_smoothness_loss $del_smoothness_loss \
     --del_freq_loss $del_freq_loss \
+    --del_recon_loss $del_recon_loss \
+    --log_var_recon $log_var_recon \
     --log_var_freq $log_var_freq \
     --log_var_orth $log_var_orth \
     --log_var_smooth $log_var_smooth \
@@ -312,7 +345,7 @@ python -u run.py \
     --train_epochs 50 \
     --down_sampling_layer 2 \
     --down_sampling_window 2 \
-> ./run_log/log_202506022128_win/Traffic/'TimeDART_pretrain'0.01.log 2>&1
+> ./run_log/log_202506022128_win/Traffic/'TimeDART_pretrain_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
 
 
 
@@ -352,6 +385,8 @@ echo "Traffic $denoise_layers_num _ $pred_len "
         --del_season_freq_loss $del_season_freq_loss \
         --del_smoothness_loss $del_smoothness_loss \
         --del_freq_loss $del_freq_loss \
+        --del_recon_loss $del_recon_loss \
+        --log_var_recon $log_var_recon \
         --log_var_freq $log_var_freq \
         --log_var_orth $log_var_orth \
         --log_var_smooth $log_var_smooth \
@@ -361,7 +396,7 @@ echo "Traffic $denoise_layers_num _ $pred_len "
         --pct_start 0.2 \
       --down_sampling_layer 2 \
       --down_sampling_window 2 \
-> ./run_log/log_202506022128_win/Traffic/'TimeDART_finetune'$pred_len'_'$denoise_layers_num'_'0.01.log 2>&1
+> ./run_log/log_202506022128_win/Traffic/'TimeDART_finetune'$pred_len'_'$denoise_layers_num'_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
 
 done
 

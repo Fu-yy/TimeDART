@@ -213,11 +213,15 @@ parser.add_argument('--del_orth_loss',type=int,help='del_orth_loss', default=0)
 parser.add_argument('--del_season_freq_loss', type=int, help='del_season_freq_loss', default=0)
 parser.add_argument('--del_smoothness_loss',type=int,help='del_smoothness_loss', default=0)
 parser.add_argument('--del_freq_loss', type=int, help='del_freq_loss', default=0)
+parser.add_argument('--del_recon_loss', type=int, help='del_recon_loss', default=0)
 
-parser.add_argument('--log_var_freq',type=float,help='del_orth_loss', default=1.0)
-parser.add_argument('--log_var_orth', type=float, help='del_season_freq_loss', default=300.0)
-parser.add_argument('--log_var_smooth',type=float,help='del_smoothness_loss', default=0.001)
-parser.add_argument('--log_var_season_freq', type=float, help='del_freq_loss', default=5.0)
+
+parser.add_argument('--log_var_freq',type=float,help='del_orth_loss', default=0.2)
+parser.add_argument('--log_var_orth', type=float, help='del_season_freq_loss', default=6.0)
+parser.add_argument('--log_var_smooth',type=float,help='del_smoothness_loss', default=1.0)
+parser.add_argument('--log_var_season_freq', type=float, help='del_freq_loss', default=4.0)
+
+parser.add_argument('--log_var_recon', type=float, help='del_freq_loss', default=0.1)
 
 
 args = parser.parse_args()

@@ -296,34 +296,37 @@ class StopLearnableMultiScaleDecomp(nn.Module):
         # === 科学修正的损失计算 ===
         # 1. 趋势项低频保护 + 高频抑制
         trend_fft = torch.fft.rfft(fused_trend, dim=-1)
+        # 频域处理 (动态比例)
         n_freq = trend_fft.size(-1)
-        if n_freq > 5:
-            # 保护前5个低频分量（0-4），抑制高频（5+）
-            trend_freq_loss = torch.mean(torch.abs(trend_fft[..., 5:]))
-        else:
-            trend_freq_loss = torch.tensor(0.0, device=x.device)
+        k_protect = max(1, int(n_freq * 0.1))
+        k_mid = min(n_freq, int(n_freq * 0.8))
+
+        # 趋势损失: 保护极低频，抑制其他
+        trend_freq_loss = torch.mean(torch.abs(trend_fft[..., k_protect:]))
+
+
 
         # 2. 季节项低频抑制（非高频激励！）
         seasonal_fft = torch.fft.rfft(seasonal, dim=-1)
-        if seasonal_fft.size(-1) > 5:
-            # 抑制前5个低频分量（避免包含趋势信息）
-            season_freq_loss = torch.mean(torch.abs(seasonal_fft[..., :5]))
-        else:
-            season_freq_loss = torch.mean(torch.abs(seasonal_fft))
+        # 季节损失: 抑制极低频+高频，保护中频
+        season_freq_loss = torch.mean(torch.abs(seasonal_fft[..., :k_protect])) + \
+                           torch.mean(torch.abs(seasonal_fft[..., k_mid:]))
 
         # 3. 正交约束（科学修正）
+        # 正交约束 (双方中心化)
+        centered_trend = fused_trend - fused_trend.mean(dim=-1, keepdim=True)
         centered_seasonal = seasonal - seasonal.mean(dim=-1, keepdim=True)
-        orth_term = (centered_seasonal * fused_trend).sum(dim=-1)
-        orth_loss = torch.mean(orth_term ** 2)
+        orth_loss = torch.mean((centered_seasonal * centered_trend).sum(dim=-1) ** 2)
 
-        # 4. 平滑性约束（启用二阶差分）
-        if fused_trend.size(-1) >= 3:
-            # 趋势项的二阶导数应趋近于0
-            smooth_loss = torch.mean(torch.diff(fused_trend, n=2, dim=-1) ** 2)
-        else:
-            smooth_loss = torch.tensor(0.0, device=x.device)
-
-        return seasonal.permute(0, 2, 1), fused_trend.permute(0, 2, 1), trend_freq_loss,orth_loss,smooth_loss,season_freq_loss
+        # 平滑约束 (混合一阶/二阶)
+        smooth_loss = 0.0
+        if L >= 3:
+            first_diff = torch.mean(torch.diff(fused_trend, dim=-1) ** 2)
+            second_diff = torch.mean(torch.diff(fused_trend, n=2, dim=-1) ** 2)
+            smooth_loss = 0.6 * second_diff + 0.4 * first_diff
+        # 重构约束
+        recon_loss = F.l1_loss(x, seasonal + fused_trend)
+        return seasonal.permute(0, 2, 1), fused_trend.permute(0, 2, 1), trend_freq_loss,orth_loss,smooth_loss,season_freq_loss,recon_loss
 def plot_tensors(tensor_list,file_name,index):
     project_path = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
     fig_path = project_path + os.sep + 'trend_figs'
@@ -709,10 +712,13 @@ class Model(nn.Module):
             ])
 
         # 自适应可学习权重参数
-        self.log_var_freq = nn.Parameter(torch.log(torch.tensor(self.configs.log_var_freq)))  # 频率损失初始权重 ≈0.5
-        self.log_var_orth = nn.Parameter(torch.log(torch.tensor(self.configs.log_var_orth)))  # 正交损失初始权重 ≈0.0017
-        self.log_var_smooth = nn.Parameter(torch.log(torch.tensor(self.configs.log_var_smooth)))  # 平滑损失初始权重 ≈500
-        self.log_var_season_freq = nn.Parameter(torch.log(torch.tensor(self.configs.log_var_season_freq)))  # 季节频率初始权重 ≈0.1
+        # 自适应损失权重参数
+        # 修正后的初始化参数（基于损失量级平衡）
+        self.log_var_freq = nn.Parameter(torch.tensor(self.configs.log_var_freq), requires_grad=True)  # 原-0.7 → 0.0
+        self.log_var_orth = nn.Parameter(torch.tensor(self.configs.log_var_orth), requires_grad=True)  # 原-6.9 → -3.0
+        self.log_var_smooth = nn.Parameter(torch.tensor(self.configs.log_var_smooth), requires_grad=True)  # 原0.0 → -4.0
+        self.log_var_season_freq = nn.Parameter(torch.tensor(self.configs.log_var_season_freq), requires_grad=True)  # 原-2.3 → 1.0
+        self.log_var_recon = nn.Parameter(torch.tensor(self.configs.log_var_recon), requires_grad=True)  # 原-2.3 → -10.0
         # self.log_var_freq = nn.Parameter(torch.log(torch.tensor(1.0)))  # 频率损失初始权重 ≈0.5
         # self.log_var_orth = nn.Parameter(torch.log(torch.tensor(300.0)))  # 正交损失初始权重 ≈0.0017
         # self.log_var_smooth = nn.Parameter(torch.log(torch.tensor(0.001)))  # 平滑损失初始权重 ≈500
@@ -774,7 +780,7 @@ class Model(nn.Module):
         x = x / stdevs  # [batch_size, input_len, num_features]
 
         # 分解  1
-        x, trend,freq_loss,orth_loss,smoothness,season_freq_loss = self.decomp_multi_learnable(x)
+        x, trend,freq_loss,orth_loss,smoothness,season_freq_loss,recon_loss = self.decomp_multi_learnable(x)
         # x, trend = self.decomp_multi(x)
 
         # x, trend = x,x
@@ -813,6 +819,7 @@ class Model(nn.Module):
         orth_loss_inner_list = []
         smoothness_inner_list = []
         season_freq_loss_inner_list = []
+        recon_loss_inner_list = []
         # 获取总去噪层数和扩散模型总时间步
         num_denoise_layers = len(self.denoise_layers_cond)
         total_time_steps = self.diffusion.time_steps
@@ -860,7 +867,7 @@ class Model(nn.Module):
 
             # 分解  5
             # noise_x_embedding, _ = noise_x_embedding,noise_x_embedding
-            x_out, x_out_trend,freq_loss_inner,orth_loss_inner,smoothness_inner ,season_freq_loss_inner= self.decomp_multi_learnable_third(x_out)
+            x_out, x_out_trend,freq_loss_inner,orth_loss_inner,smoothness_inner ,season_freq_loss_inner,recon_loss_inner= self.decomp_multi_learnable_third(x_out)
             # x_out, x_out_trend = self.decomp_multi(x_out)
 
             # x_out, x_out_trend = x_out,x_out
@@ -897,6 +904,7 @@ class Model(nn.Module):
             orth_loss_inner_list.append(orth_loss_inner)
             smoothness_inner_list.append(smoothness_inner)
             season_freq_loss_inner_list.append(season_freq_loss_inner)
+            recon_loss_inner_list.append(recon_loss_inner)
 
             # predict_x = denoise_out + self.regression[0](trend.permute(0,2,1)).permute(0,2,1).contiguous()
             predict_x = denoise_out
@@ -922,17 +930,12 @@ class Model(nn.Module):
         total_orth = orth_loss + sum(orth_loss_inner_list)
         total_smooth = smoothness + sum(smoothness_inner_list)
         total_season_freq = season_freq_loss + sum(season_freq_loss_inner_list)
+
+        total_recon_loss = recon_loss + sum(recon_loss_inner_list)
         # return predict_x,0,0,0
         # return predict_x,total_freq,total_orth,total_smooth,total_season_freq
-        if self.configs.del_orth_loss == 1:
-            total_orth = 0 # 618
-        elif self.configs.del_smoothness_loss ==1:
-            total_smooth = 0 # 0.0025
-        elif self.configs.del_season_freq_loss == 1:
-            total_season_freq = 0  # 10.6285
-        elif self.configs.del_freq_loss ==1:
-            total_freq = 0  # 2.3
-        return predict_x,total_freq,total_orth,total_smooth,total_season_freq
+
+        return predict_x,total_freq,total_orth,total_smooth,total_season_freq,total_recon_loss
 
     def forecast(self, x,x_mark):
         # x = torch.fft.fft(x,dim=-2).real
@@ -946,7 +949,7 @@ class Model(nn.Module):
         ).detach()
         x = x / stdevs
         # x, trend = self.decomp_multi(x)
-        x, trend,freq_loss,orth_loss,smoothness,season_freq_loss = self.decomp_multi_learnable(x)
+        x, trend,freq_loss,orth_loss,smoothness,season_freq_loss,recon_loss = self.decomp_multi_learnable(x)
         # x, trend = x,x
         x = self.channel_independence[0](x)  # [batch_size * num_features, input_len, 1]
         x = self.patch(x)  # [batch_size * num_features, seq_len, patch_len]
@@ -993,16 +996,7 @@ class Model(nn.Module):
         x = x + (means[:, 0, :].unsqueeze(1)).repeat(1, self.pred_len, 1)
 
 
-        # return x,freq_loss,orth_loss,smoothness,season_freq_loss
-        if self.configs.del_orth_loss == 1:
-            orth_loss = 0
-        elif self.configs.del_smoothness_loss ==1:
-            smoothness = 0
-        elif self.configs.del_season_freq_loss == 1:
-            season_freq_loss = 0
-        elif self.configs.del_freq_loss ==1:
-            freq_loss = 0
-        return x,freq_loss,orth_loss,smoothness,season_freq_loss
+        return x,freq_loss,orth_loss,smoothness,season_freq_loss,recon_loss
         # return x,0,0,0
 
     def forward(self, batch_x,x_mask,i=0):
@@ -1010,8 +1004,8 @@ class Model(nn.Module):
         if self.task_name == "pretrain":
             return self.pretrain(batch_x,x_mask,i)
         elif self.task_name == "finetune":
-            dec_out,freq_loss,orth_loss,smoothness,season_freq_loss = self.forecast(batch_x,x_mask)
-            return dec_out[:, -self.pred_len: , :],freq_loss,orth_loss,smoothness,season_freq_loss
+            dec_out,freq_loss,orth_loss,smoothness,season_freq_loss,recon_loss = self.forecast(batch_x,x_mask)
+            return dec_out[:, -self.pred_len: , :],freq_loss,orth_loss,smoothness,season_freq_loss,recon_loss
         else:
             raise ValueError("task_name should be 'pretrain' or 'finetune'")
 
