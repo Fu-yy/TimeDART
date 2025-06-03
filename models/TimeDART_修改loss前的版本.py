@@ -293,37 +293,22 @@ class StopLearnableMultiScaleDecomp(nn.Module):
         # 季节项
         seasonal = x - fused_trend
 
-        # === 科学修正的损失计算 ===
-        # 1. 趋势项低频保护 + 高频抑制
+        # 频域约束（抑制高频）
         trend_fft = torch.fft.rfft(fused_trend, dim=-1)
-        n_freq = trend_fft.size(-1)
-        if n_freq > 5:
-            # 保护前5个低频分量（0-4），抑制高频（5+）
-            trend_freq_loss = torch.mean(torch.abs(trend_fft[..., 5:]))
-        else:
-            trend_freq_loss = torch.tensor(0.0, device=x.device)
+        freq_loss = torch.mean(torch.abs(trend_fft[..., 2:]))  # 忽略前5个低频
 
-        # 2. 季节项低频抑制（非高频激励！）
-        seasonal_fft = torch.fft.rfft(seasonal, dim=-1)
-        if seasonal_fft.size(-1) > 5:
-            # 抑制前5个低频分量（避免包含趋势信息）
-            season_freq_loss = torch.mean(torch.abs(seasonal_fft[..., :5]))
-        else:
-            season_freq_loss = torch.mean(torch.abs(seasonal_fft))
+        # 平滑性约束
+        # smooth_loss = torch.mean(torch.diff(fused_trend, n=2, dim=-1) ** 2)
+        smooth_loss=0
+        # 正交约束
+        # orth_loss = torch.mean((seasonal * fused_trend).sum(dim=-1) ** 2)
+        orth_loss=0
+        # total_loss = freq_loss + 0.1 * smooth_loss + 0.1 * orth_loss
+        # 季节项高频激励（可选）
+        seasonal_fft = torch.fft.rfft(seasonal, dim=2)  # [B,C, L//2+1]
+        season_freq_loss = -torch.mean(torch.abs(seasonal_fft[..., 5:]))  # 激励高频
 
-        # 3. 正交约束（科学修正）
-        centered_seasonal = seasonal - seasonal.mean(dim=-1, keepdim=True)
-        orth_term = (centered_seasonal * fused_trend).sum(dim=-1)
-        orth_loss = torch.mean(orth_term ** 2)
-
-        # 4. 平滑性约束（启用二阶差分）
-        if fused_trend.size(-1) >= 3:
-            # 趋势项的二阶导数应趋近于0
-            smooth_loss = torch.mean(torch.diff(fused_trend, n=2, dim=-1) ** 2)
-        else:
-            smooth_loss = torch.tensor(0.0, device=x.device)
-
-        return seasonal.permute(0, 2, 1), fused_trend.permute(0, 2, 1), trend_freq_loss,orth_loss,smooth_loss,season_freq_loss
+        return seasonal.permute(0, 2, 1), fused_trend.permute(0, 2, 1), freq_loss,orth_loss,smooth_loss,season_freq_loss
 def plot_tensors(tensor_list,file_name,index):
     project_path = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
     fig_path = project_path + os.sep + 'trend_figs'
@@ -709,19 +694,14 @@ class Model(nn.Module):
             ])
 
         # 自适应可学习权重参数
-        self.log_var_freq = nn.Parameter(torch.log(torch.tensor(self.configs.log_var_freq)))  # 频率损失初始权重 ≈0.5
-        self.log_var_orth = nn.Parameter(torch.log(torch.tensor(self.configs.log_var_orth)))  # 正交损失初始权重 ≈0.0017
-        self.log_var_smooth = nn.Parameter(torch.log(torch.tensor(self.configs.log_var_smooth)))  # 平滑损失初始权重 ≈500
-        self.log_var_season_freq = nn.Parameter(torch.log(torch.tensor(self.configs.log_var_season_freq)))  # 季节频率初始权重 ≈0.1
-        # self.log_var_freq = nn.Parameter(torch.log(torch.tensor(1.0)))  # 频率损失初始权重 ≈0.5
-        # self.log_var_orth = nn.Parameter(torch.log(torch.tensor(300.0)))  # 正交损失初始权重 ≈0.0017
-        # self.log_var_smooth = nn.Parameter(torch.log(torch.tensor(0.001)))  # 平滑损失初始权重 ≈500
-        # self.log_var_season_freq = nn.Parameter(torch.log(torch.tensor(5.0)))  # 季节频率初始权重 ≈0.1
-
-        # self.log_var_freq = torch.tensor(self.configs.log_var_freq)
-        # self.log_var_orth = torch.tensor(self.configs.log_var_orth)
-        # self.log_var_smooth = torch.tensor(self.configs.log_var_smooth)
-        # self.log_var_season_freq = torch.tensor(self.configs.log_var_season_freq)
+        # self.log_var_freq = nn.Parameter(torch.log(torch.tensor(0.1)))
+        # self.log_var_orth = nn.Parameter(torch.log(torch.tensor(0.1)))
+        # self.log_var_smooth = nn.Parameter(torch.log(torch.tensor(0.1)))
+        # self.log_var_season_freq = nn.Parameter(torch.log(torch.tensor(0.1)))
+        self.log_var_freq = torch.tensor(self.configs.log_var_freq)
+        self.log_var_orth = torch.tensor(self.configs.log_var_orth)
+        self.log_var_smooth = torch.tensor(self.configs.log_var_smooth)
+        self.log_var_season_freq = torch.tensor(self.configs.log_var_season_freq)
 
 
 
@@ -925,13 +905,13 @@ class Model(nn.Module):
         # return predict_x,0,0,0
         # return predict_x,total_freq,total_orth,total_smooth,total_season_freq
         if self.configs.del_orth_loss == 1:
-            total_orth = 0 # 618
+            total_orth = 0
         elif self.configs.del_smoothness_loss ==1:
-            total_smooth = 0 # 0.0025
+            total_smooth = 0
         elif self.configs.del_season_freq_loss == 1:
-            total_season_freq = 0  # 10.6285
+            total_season_freq = 0
         elif self.configs.del_freq_loss ==1:
-            total_freq = 0  # 2.3
+            total_freq = 0
         return predict_x,total_freq,total_orth,total_smooth,total_season_freq
 
     def forecast(self, x,x_mark):

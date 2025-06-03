@@ -293,37 +293,22 @@ class StopLearnableMultiScaleDecomp(nn.Module):
         # 季节项
         seasonal = x - fused_trend
 
-        # === 科学修正的损失计算 ===
-        # 1. 趋势项低频保护 + 高频抑制
+        # 频域约束（抑制高频）
         trend_fft = torch.fft.rfft(fused_trend, dim=-1)
-        n_freq = trend_fft.size(-1)
-        if n_freq > 5:
-            # 保护前5个低频分量（0-4），抑制高频（5+）
-            trend_freq_loss = torch.mean(torch.abs(trend_fft[..., 5:]))
-        else:
-            trend_freq_loss = torch.tensor(0.0, device=x.device)
+        freq_loss = torch.mean(torch.abs(trend_fft[..., 2:]))  # 忽略前5个低频
 
-        # 2. 季节项低频抑制（非高频激励！）
-        seasonal_fft = torch.fft.rfft(seasonal, dim=-1)
-        if seasonal_fft.size(-1) > 5:
-            # 抑制前5个低频分量（避免包含趋势信息）
-            season_freq_loss = torch.mean(torch.abs(seasonal_fft[..., :5]))
-        else:
-            season_freq_loss = torch.mean(torch.abs(seasonal_fft))
+        # 平滑性约束
+        smooth_loss = torch.mean(torch.diff(fused_trend, n=2, dim=-1) ** 2)
 
-        # 3. 正交约束（科学修正）
-        centered_seasonal = seasonal - seasonal.mean(dim=-1, keepdim=True)
-        orth_term = (centered_seasonal * fused_trend).sum(dim=-1)
-        orth_loss = torch.mean(orth_term ** 2)
+        # 正交约束
+        orth_loss = torch.mean((seasonal * fused_trend).sum(dim=-1) ** 2)
 
-        # 4. 平滑性约束（启用二阶差分）
-        if fused_trend.size(-1) >= 3:
-            # 趋势项的二阶导数应趋近于0
-            smooth_loss = torch.mean(torch.diff(fused_trend, n=2, dim=-1) ** 2)
-        else:
-            smooth_loss = torch.tensor(0.0, device=x.device)
+        # total_loss = freq_loss + 0.1 * smooth_loss + 0.1 * orth_loss
+        # 季节项高频激励（可选）
+        seasonal_fft = torch.fft.rfft(seasonal, dim=2)  # [B,C, L//2+1]
+        season_freq_loss = -torch.mean(torch.abs(seasonal_fft[..., 5:]))  # 激励高频
 
-        return seasonal.permute(0, 2, 1), fused_trend.permute(0, 2, 1), trend_freq_loss,orth_loss,smooth_loss,season_freq_loss
+        return seasonal.permute(0, 2, 1), fused_trend.permute(0, 2, 1), freq_loss,orth_loss,smooth_loss,season_freq_loss
 def plot_tensors(tensor_list,file_name,index):
     project_path = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
     fig_path = project_path + os.sep + 'trend_figs'
@@ -709,22 +694,10 @@ class Model(nn.Module):
             ])
 
         # 自适应可学习权重参数
-        self.log_var_freq = nn.Parameter(torch.log(torch.tensor(self.configs.log_var_freq)))  # 频率损失初始权重 ≈0.5
-        self.log_var_orth = nn.Parameter(torch.log(torch.tensor(self.configs.log_var_orth)))  # 正交损失初始权重 ≈0.0017
-        self.log_var_smooth = nn.Parameter(torch.log(torch.tensor(self.configs.log_var_smooth)))  # 平滑损失初始权重 ≈500
-        self.log_var_season_freq = nn.Parameter(torch.log(torch.tensor(self.configs.log_var_season_freq)))  # 季节频率初始权重 ≈0.1
-        # self.log_var_freq = nn.Parameter(torch.log(torch.tensor(1.0)))  # 频率损失初始权重 ≈0.5
-        # self.log_var_orth = nn.Parameter(torch.log(torch.tensor(300.0)))  # 正交损失初始权重 ≈0.0017
-        # self.log_var_smooth = nn.Parameter(torch.log(torch.tensor(0.001)))  # 平滑损失初始权重 ≈500
-        # self.log_var_season_freq = nn.Parameter(torch.log(torch.tensor(5.0)))  # 季节频率初始权重 ≈0.1
-
-        # self.log_var_freq = torch.tensor(self.configs.log_var_freq)
-        # self.log_var_orth = torch.tensor(self.configs.log_var_orth)
-        # self.log_var_smooth = torch.tensor(self.configs.log_var_smooth)
-        # self.log_var_season_freq = torch.tensor(self.configs.log_var_season_freq)
-
-
-
+        self.log_var_freq = nn.Parameter(torch.log(torch.tensor(0.1)))
+        self.log_var_orth = nn.Parameter(torch.log(torch.tensor(0.1)))
+        self.log_var_smooth = nn.Parameter(torch.log(torch.tensor(0.1)))
+        self.log_var_season_freq = nn.Parameter(torch.log(torch.tensor(0.1)))
         self.decomp_multi = series_decomp(95)
         self.decomp_multi_learnable = StopLearnableMultiScaleDecomp(self.configs.c_out,max_lag=63,num_scales=4,peak_threshold=0.3,distance=10)
         # self.decomp_multi_learnable_second = StopLearnableMultiScaleDecomp(self.patch_len,num_scales=4)
@@ -803,7 +776,8 @@ class Model(nn.Module):
 
         # 分解  2
         # x_embedding_bias, _ = self.decomp_multi(x_embedding_bias)
-        # x_embedding_bias, _ = x_embedding_bias,x_embedding_
+        # x_embedding_bias, _ = x_embedding_bias,x_embedding_bias
+
         x_out = self.encoder(
             x_embedding_bias,
             is_mask=True,
@@ -813,12 +787,8 @@ class Model(nn.Module):
         orth_loss_inner_list = []
         smoothness_inner_list = []
         season_freq_loss_inner_list = []
-        # 获取总去噪层数和扩散模型总时间步
-        num_denoise_layers = len(self.denoise_layers_cond)
-        total_time_steps = self.diffusion.time_steps
-
         res_pred = []
-        for layer_idx, layer in enumerate(self.denoise_layers_cond):
+        for layer in self.denoise_layers_cond:
             x = self.channel_independence[0](x)  # [batch_size * num_features, input_len, 1]
             # Patch
             x_patch = self.patch(x)  # [batch_size * num_features, seq_len, patch_len]
@@ -826,31 +796,22 @@ class Model(nn.Module):
             # 分解  3
             # x_patch, default_trend1 = self.decomp_multi_learnable_second(x_patch)
             # x_patch, default_trend = x_patch,x_patch
-            # 动态计算当前层的时间步（退火策略）
-            current_time_step = int((total_time_steps - 1) * (1 - layer_idx / num_denoise_layers))
-            # 创建与输入形状匹配的时间步张量 [batch*features, seq_len]
-            t = torch.full(
-                (x_patch.size(0), x_patch.size(1)),
-                current_time_step,
-                device=self.device,
-                dtype=torch.long
-            )
-            # noise_x_patch, _, _ = self.diffusion(
-            #     x_patch
-            # )  # [batch_size * num_features, seq_len, patch_len]
-            # 添加分层退火噪声
-            noise_x_patch, _ = self.diffusion.noise_with_t(x_patch, t)  # 使用指定t的噪声生成
+
+            noise_x_patch, _, _ = self.diffusion(
+                x_patch
+            )  # [batch_size * num_features, seq_len, patch_len]
+
 
             noise_x_embedding = self.enc_embedding(
                 noise_x_patch
             )  # [batch_size * num_features, seq_len, d_model]
             noise_x_embedding = self.positional_encoding(noise_x_embedding)
             noise_x_embedding_res = noise_x_embedding
-            # denoise_input = noise_x_embedding
-            denoise_input = self.encoder_noise(
-                noise_x_embedding,
-                is_mask=True,
-            )  # [batch_size * num_features, seq_len, d_model]
+            denoise_input = noise_x_embedding
+            # denoise_input = self.encoder_noise(
+            #     noise_x_embedding,
+            #     is_mask=False,
+            # )  # [batch_size * num_features, seq_len, d_model]
 
             # noise end --------------------------
             # 分解  4
@@ -900,9 +861,8 @@ class Model(nn.Module):
 
             # predict_x = denoise_out + self.regression[0](trend.permute(0,2,1)).permute(0,2,1).contiguous()
             predict_x = denoise_out
-            res_pred.append(predict_x)
-        res_pred = torch.stack(res_pred,dim=-1).mean(dim=-1)
-        predict_x = res_pred + self.regression[0](trend.permute(0,2,1)).permute(0,2,1).contiguous()
+            # res_pred.append(predict_x)
+        predict_x = predict_x + self.regression[0](trend.permute(0,2,1)).permute(0,2,1).contiguous()
         # if i % 20 == 0:
         #     no_trend = [default_trend1,default_trend2,x_patch,noise_x_embedding]
         #     plot_tensors(no_trend,'notrend',i)
@@ -925,13 +885,13 @@ class Model(nn.Module):
         # return predict_x,0,0,0
         # return predict_x,total_freq,total_orth,total_smooth,total_season_freq
         if self.configs.del_orth_loss == 1:
-            total_orth = 0 # 618
+            total_orth = 0
         elif self.configs.del_smoothness_loss ==1:
-            total_smooth = 0 # 0.0025
+            total_smooth = 0
         elif self.configs.del_season_freq_loss == 1:
-            total_season_freq = 0  # 10.6285
+            total_season_freq = 0
         elif self.configs.del_freq_loss ==1:
-            total_freq = 0  # 2.3
+            total_freq = 0
         return predict_x,total_freq,total_orth,total_smooth,total_season_freq
 
     def forecast(self, x,x_mark):

@@ -226,6 +226,13 @@ class Diffusion(nn.Module):
         noisy_x, noise = self.noise(x, t)
         return noisy_x, noise, t
 
+    def noise_with_t(self, x, t):
+        """手动指定时间步t添加噪声"""
+        noise = torch.randn_like(x)
+        gamma_t = self.gamma[t].unsqueeze(-1)  # [batch*features, seq_len, 1]
+        noisy_x = torch.sqrt(gamma_t) * x + torch.sqrt(1 - gamma_t) * noise
+        return noisy_x, noise
+
 class DiffusionForComp(nn.Module):
     def __init__(
         self,

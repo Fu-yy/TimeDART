@@ -5,6 +5,8 @@ import random
 import numpy as np
 import os
 import platform
+# os.environ["CUDA_VISIBLE_DEVICES"]="0,1,2,3,4,5,6,7"
+
 fix_seed = 2024
 random.seed(fix_seed)
 torch.manual_seed(fix_seed)
@@ -211,6 +213,11 @@ parser.add_argument('--del_orth_loss',type=int,help='del_orth_loss', default=0)
 parser.add_argument('--del_season_freq_loss', type=int, help='del_season_freq_loss', default=0)
 parser.add_argument('--del_smoothness_loss',type=int,help='del_smoothness_loss', default=0)
 parser.add_argument('--del_freq_loss', type=int, help='del_freq_loss', default=0)
+
+parser.add_argument('--log_var_freq',type=float,help='del_orth_loss', default=1.0)
+parser.add_argument('--log_var_orth', type=float, help='del_season_freq_loss', default=300.0)
+parser.add_argument('--log_var_smooth',type=float,help='del_smoothness_loss', default=0.001)
+parser.add_argument('--log_var_season_freq', type=float, help='del_freq_loss', default=5.0)
 
 
 args = parser.parse_args()

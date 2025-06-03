@@ -4,7 +4,9 @@ from einops import rearrange, repeat
 import pandas as pd
 from scipy.signal import find_peaks
 
-from layers.Autoformer_EncDec import moving_avg, series_decomp
+from data_provider.data_factory_draw import data_provider
+from exp.exp_timedart_draw import Exp_TimeDART
+from layers.Autoformer_EncDec import moving_avg, series_decomp, series_decomp_multi
 from layers.Transformer_EncDec import Decoder, DecoderLayer, Encoder, EncoderLayer
 from layers.SelfAttention_Family import DSAttention, AttentionLayer, FullAttention
 from layers.TimeDART_EncDec import (
@@ -25,6 +27,342 @@ import matplotlib.pyplot as plt
 # TimeDART_version2
 # 只保留15分解，用新的分解策略
 
+# ----------------------
+
+import numpy as np
+import pandas as pd
+from statsmodels.tsa.stattools import adfuller, grangercausalitytests
+from statsmodels.stats.diagnostic import acorr_ljungbox
+from statsmodels.tsa.arima.model import ARIMA
+from scipy.signal import periodogram
+def comprehensive_decomposition_eval(original, trend, seasonal):
+    """
+    综合分解效果评估方法
+    传入参数：PyTorch Tensor格式的原始序列、趋势项、季节项
+    返回：包含所有评估指标的字典，标注指标方向性
+    """
+    # 转换为numpy数组
+    orig = original.detach().numpy()
+    trd = trend.detach().numpy()
+    seas = seasonal.detach().numpy()
+
+    # 公共计算项
+    residual = orig - trd - seas
+    results = {}
+
+    # ===== 基础指标 =====
+    # 可逆性误差
+    results['Reconstruction_Error'] = {
+        'value': np.max(np.abs(orig - (trd + seas + residual))),
+                        'criteria': '越小越好'
+    }
+
+    # # 残差白噪声检验
+    # try:
+    #     lb_test = acorr_ljungbox(residual, lags=[20], return_df=True)
+    #     results['Residual_Whiteness'] = {
+    #         'value': lb_test.iloc[0]['lb_pvalue'],
+    #         'criteria': '越大越好'
+    #     }
+    # except:
+    #     results['Residual_Whiteness'] = {'value': np.nan, 'criteria': '越大越好'}
+
+    # ===== 实用指标 =====
+    # 成分正交性
+    cross_corr = np.correlate(trd - trd.mean(), seas - seas.mean(), mode='full')
+    normalized_corr = cross_corr / (len(trd) * np.std(trd) * np.std(seas))
+    results['Component_Orthogonality'] = {
+        'value': np.max(np.abs(normalized_corr)),
+        'criteria': '越小越好'
+    }
+
+    # 预测性能
+    try:
+        # 基准预测
+        base_model = ARIMA(orig, order=(1, 1, 1)).fit()
+        base_pred = base_model.forecast(10)
+
+        # 分解预测
+        trd_pred = ARIMA(trd, order=(1, 1, 1)).fit().forecast(10)
+        seas_pred = ARIMA(seas, order=(1, 1, 1)).fit().forecast(10)
+
+        mse_ratio = np.mean((orig[-10:] - (trd_pred + seas_pred)) ** 2) / np.mean((orig[-10:] - base_pred) ** 2)
+        results['Forecast_Improvement'] = {
+            'value': 1 - mse_ratio,  # 改进幅度
+            'criteria': '越大越好'
+        }
+    except:
+        results['Forecast_Improvement'] = {'value': np.nan, 'criteria': '越大越好'}
+
+    # ===== 理论指标 =====
+    # 信息准则
+    def _safe_bic(series):
+        try:
+            return ARIMA(series, order=(1, 1, 1)).fit().bic
+        except:
+            return np.nan
+
+    bic_total = _safe_bic(trd) + _safe_bic(seas)
+    results['BIC_Optimization'] = {
+        'value': bic_total / _safe_bic(orig) if _safe_bic(orig) else np.nan,
+        'criteria': '越小越好'
+    }
+
+    # # 频域分析
+    # try:
+    #     f_orig, _ = periodogram(orig)
+    #     f_seas, _ = periodogram(seas)
+    #     results['Frequency_Match'] = {
+    #         'value': np.abs(f_orig[0] - f_seas[0]),  # 主频匹配
+    #         'criteria': '越小越好'
+    #     }
+    # except:
+    #     results['Frequency_Match'] = {'value': np.nan, 'criteria': '越小越好'}
+
+    return results
+
+
+def visualize_comparison(*metrics_list, labels=None):
+    """多模型指标对比可视化"""
+    # 数据整合
+    df = pd.concat(
+        [pd.DataFrame(m).T.assign(Model=label)
+         for m, label in zip(metrics_list, labels)],
+        axis=0
+    ).reset_index().rename(columns={'index': 'Metric'})
+
+    # 创建对比热图
+    plt.figure(figsize=(12, 6))
+    pivot_table = df.pivot(index='Model', columns='Metric', values='value')
+    sns.heatmap(
+        pivot_table,
+        annot=True,
+        fmt=".2f",
+        cmap="RdYlGn",
+        center=0,
+        linewidths=.5,
+        annot_kws={"size": 12}
+    )
+    plt.title("Decomposition Quality Metrics Comparison")
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+
+
+import pandas as pd
+import numpy as np
+
+
+def create_comparison_table(my_metrics, baseline_metrics):
+    """
+    创建专业指标对比表格
+    参数：
+        my_metrics: 我的模型指标字典
+        baseline_metrics: 基线模型指标字典
+    返回：
+        格式化后的对比表格（Markdown格式）
+    """
+    # 创建对比数据框架
+    comparison = []
+
+    for metric in my_metrics.keys():
+        row = {
+            'Metric': metric,
+            'Direction': my_metrics[metric]['criteria'][:3],  # 显示"越大"或"越小"
+            'My Model': _format_value(my_metrics[metric]['value']),
+            'Baseline': _format_value(baseline_metrics[metric]['value']),
+            'Comparison': _compare_values(
+                my_metrics[metric]['value'],
+                baseline_metrics[metric]['value'],
+                my_metrics[metric]['criteria']
+            )
+        }
+        comparison.append(row)
+
+    df = pd.DataFrame(comparison)
+
+    # 生成Markdown表格
+    markdown_table = df.to_markdown(index=False, floatfmt=".2f")
+
+    # 添加表格说明
+    caption = ("\n\n**说明：**\n"
+               "- ✅ 表示当前模型更优\n"
+               "- ❌ 表示基线模型更优\n"
+               "- ➖ 表示数据不可比\n"
+               "- 数值格式：科学计数法用于绝对值<0.001的值")
+
+    return markdown_table + caption
+
+
+def _format_value(value):
+    """专业数值格式化"""
+    if pd.isna(value):
+        return "N/A"
+    if abs(value) < 0.001 and value != 0:
+        return f"{value:.2e}"
+    return f"{value:.3f}"
+
+
+def _compare_values(my_val, base_val, criteria):
+    """智能比较结果"""
+    if pd.isna(my_val) or pd.isna(base_val):
+        return "➖"
+
+    if "小" in criteria:
+        better = my_val < base_val
+    else:
+        better = my_val > base_val
+
+    return "✅" if better else "❌"
+
+
+
+
+def radar_plot_comparison(metrics1, metrics2, labels=('Model A', 'Model B')):
+    """分解质量雷达图对比"""
+    categories = list(metrics1.keys())
+    values1 = [v['value'] for v in metrics1.values()]
+    values2 = [v['value'] for v in metrics2.values()]
+
+    # 修改后（统一归一化）
+    combined_values = list(values1) + list(values2)
+    scaler = MinMaxScaler(feature_range=(0, 1)).fit([[v] for v in combined_values])
+    scaled_values1 = [scaler.transform([[v]])[0][0] for v in values1]
+    scaled_values2 = [scaler.transform([[v]])[0][0] for v in values2]
+    # # 归一化处理（根据指标方向）
+    # scaler = MinMaxScaler(feature_range=(0, 1))
+    # scaled_values1 = scaler.fit_transform([[v] for v in values1]).flatten()
+    # scaled_values2 = scaler.fit_transform([[v] for v in values2]).flatten()
+
+    angles = np.linspace(0, 2 * np.pi, len(categories), endpoint=False).tolist()
+
+    fig = plt.figure(figsize=(8, 8))
+    ax = fig.add_subplot(111, polar=True)
+
+    # 绘图
+    ax.plot(angles, scaled_values1, 'b-', label=labels[0])
+    ax.fill(angles, scaled_values1, 'b', alpha=0.1)
+    ax.plot(angles, scaled_values2, 'r-', label=labels[1])
+    ax.fill(angles, scaled_values2, 'r', alpha=0.1)
+
+    # 标注
+    ax.set_theta_offset(np.pi / 2)
+    ax.set_theta_direction(-1)
+    plt.xticks(angles, categories)
+    ax.set_rlabel_position(0)
+    plt.yticks([0.2, 0.4, 0.6, 0.8], ["20%", "40%", "60%", "80%"], color="grey", size=7)
+    plt.legend(loc='upper right')
+    plt.savefig('TimeDART.png', dpi=300)
+
+import plotly.express as px
+from sklearn.preprocessing import MinMaxScaler
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+
+
+def plot_metrics_comparison(my_metrics, baseline_metrics, figsize=(12, 8)):
+    """
+    专业指标对比可视化
+    参数：
+        my_metrics: 我的模型指标字典
+        baseline_metrics: 基线模型指标字典
+        figsize: 图表尺寸
+    """
+    # 数据预处理
+    metrics_order = [
+        'Reconstruction_Error',
+        'Residual_Whiteness',
+        'Component_Orthogonality',
+        'Forecast_Improvement',
+        'BIC_Optimization',
+        'Frequency_Match'
+    ]
+
+    # 创建对比DataFrame
+    df = pd.DataFrame({
+        'My Model': [my_metrics[m]['value'] for m in metrics_order],
+        'Baseline': [baseline_metrics[m]['value'] for m in metrics_order]
+    }, index=metrics_order)
+
+    # 方向处理
+    directions = {
+        m: '↓' if '小' in my_metrics[m]['criteria'] else '↑'
+        for m in metrics_order
+    }
+
+    # 创建画布
+    fig, ax = plt.subplots(figsize=figsize)
+
+    # 设置位置参数
+    x = np.arange(len(metrics_order))
+    width = 0.35
+
+    # 定义颜色映射函数
+    def get_colors(my_val, base_val, direction):
+        if np.isnan(my_val) or np.isnan(base_val):
+            return ('grey', 'grey')
+        if direction == '↓':
+            better = my_val < base_val
+        else:
+            better = my_val > base_val
+        return ('#2ca02c' if better else '#d62728', '#7f7f7f')
+
+    # 绘制柱状图
+    for i, metric in enumerate(metrics_order):
+        my_val = df.loc[metric, 'My Model']
+        base_val = df.loc[metric, 'Baseline']
+        my_color, base_color = get_colors(my_val, base_val, directions[metric])
+
+        # 绘制我的模型
+        ax.bar(x[i] - width / 2, my_val, width, color=my_color, edgecolor='black')
+        # 绘制基线模型
+        ax.bar(x[i] + width / 2, base_val, width, color=base_color, edgecolor='black', alpha=0.6)
+
+        # 添加数值标注
+        if not np.isnan(my_val):
+            ax.text(x[i] - width / 2, my_val * 1.05, f'{my_val:.2e}' if abs(my_val) < 1e-3 else f'{my_val:.2f}',
+                    ha='center', va='bottom', fontsize=9)
+        if not np.isnan(base_val):
+            ax.text(x[i] + width / 2, base_val * 1.05, f'{base_val:.2e}' if abs(base_val) < 1e-3 else f'{base_val:.2f}',
+                    ha='center', va='bottom', fontsize=9)
+
+    # 图表装饰
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"{name}\n({dir})" for name, dir in directions.items()], rotation=45, ha='right')
+    ax.set_ylabel('Metric Value')
+    ax.set_title('Model Performance Comparison')
+
+    # 添加图例
+    ax.plot([], [], color='#2ca02c', label='My Model (Better)')
+    ax.plot([], [], color='#d62728', label='My Model (Worse)')
+    ax.plot([], [], color='#7f7f7f', alpha=0.6, label='Baseline')
+    ax.legend(loc='upper right')
+
+    # 添加网格
+    ax.yaxis.grid(True, linestyle='--', alpha=0.6)
+
+    plt.tight_layout()
+    plt.savefig('TimeDART.png',dpi=300)
+    plt.show()
+def interactive_dashboard(metrics_dict):
+    """交互式指标分析仪表盘"""
+    df = pd.DataFrame([
+        {'Model': k, 'Metric': m, 'Value': v['value'], 'Direction': v['criteria']}
+        for k, metrics in metrics_dict.items()
+        for m, v in metrics.items()
+    ])
+
+    fig = px.parallel_coordinates(df,
+                                  color="Model",
+                                  dimensions=["Metric", "Value"],
+                                  color_continuous_scale=px.colors.diverging.Tealrose,
+                                  labels={'Value': 'Normalized Value'},
+                                  title="Decomposition Metrics Parallel Coordinates"
+                                  )
+    fig.show()
+
+# ----------------------
 
 def calculate_scales_optimized(data, num_scales=3, max_lag=63, peak_threshold=0.3):
     """完全基于PyTorch的优化实现"""
@@ -293,37 +631,25 @@ class StopLearnableMultiScaleDecomp(nn.Module):
         # 季节项
         seasonal = x - fused_trend
 
-        # === 科学修正的损失计算 ===
-        # 1. 趋势项低频保护 + 高频抑制
+        # plot_line_charts([x,seasonal,fused_trend],["x","season","trend"],name='decomp_line')
+        # plot_smooth_raw_heatmaps([x,seasonal,fused_trend],["x","season","trend"],name="decomp_heat")
+
+        # 频域约束（抑制高频）
         trend_fft = torch.fft.rfft(fused_trend, dim=-1)
-        n_freq = trend_fft.size(-1)
-        if n_freq > 5:
-            # 保护前5个低频分量（0-4），抑制高频（5+）
-            trend_freq_loss = torch.mean(torch.abs(trend_fft[..., 5:]))
-        else:
-            trend_freq_loss = torch.tensor(0.0, device=x.device)
+        freq_loss = torch.mean(torch.abs(trend_fft[..., 2:]))  # 忽略前5个低频
 
-        # 2. 季节项低频抑制（非高频激励！）
-        seasonal_fft = torch.fft.rfft(seasonal, dim=-1)
-        if seasonal_fft.size(-1) > 5:
-            # 抑制前5个低频分量（避免包含趋势信息）
-            season_freq_loss = torch.mean(torch.abs(seasonal_fft[..., :5]))
-        else:
-            season_freq_loss = torch.mean(torch.abs(seasonal_fft))
+        # 平滑性约束
+        smooth_loss = torch.mean(torch.diff(fused_trend, n=2, dim=-1) ** 2)
 
-        # 3. 正交约束（科学修正）
-        centered_seasonal = seasonal - seasonal.mean(dim=-1, keepdim=True)
-        orth_term = (centered_seasonal * fused_trend).sum(dim=-1)
-        orth_loss = torch.mean(orth_term ** 2)
+        # 正交约束
+        orth_loss = torch.mean((seasonal * fused_trend).sum(dim=-1) ** 2)
 
-        # 4. 平滑性约束（启用二阶差分）
-        if fused_trend.size(-1) >= 3:
-            # 趋势项的二阶导数应趋近于0
-            smooth_loss = torch.mean(torch.diff(fused_trend, n=2, dim=-1) ** 2)
-        else:
-            smooth_loss = torch.tensor(0.0, device=x.device)
+        # total_loss = freq_loss + 0.1 * smooth_loss + 0.1 * orth_loss
+        # 季节项高频激励（可选）
+        seasonal_fft = torch.fft.rfft(seasonal, dim=2)  # [B,C, L//2+1]
+        season_freq_loss = -torch.mean(torch.abs(seasonal_fft[..., 5:]))  # 激励高频
 
-        return seasonal.permute(0, 2, 1), fused_trend.permute(0, 2, 1), trend_freq_loss,orth_loss,smooth_loss,season_freq_loss
+        return seasonal.permute(0, 2, 1), fused_trend.permute(0, 2, 1), freq_loss,orth_loss,smooth_loss,season_freq_loss
 def plot_tensors(tensor_list,file_name,index):
     project_path = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
     fig_path = project_path + os.sep + 'trend_figs'
@@ -544,10 +870,254 @@ class DenoisingConditionDecoder(nn.Module):
         return output
 
 
+import matplotlib.pyplot as plt
+import seaborn as sns
+import numpy as np
+from scipy.ndimage import gaussian_filter  # 用于平滑处理
+
+def plot_smooth_raw_heatmaps(tensors, smooth_method='gaussian', sigma=1.0, titles=None, layer_idx=0, name='name'):
+    """
+    绘制平滑版和原始版热图（分两个独立图像）
+
+    参数：
+        tensors       : 包含PyTorch张量的列表
+        smooth_method : 平滑方法 ('gaussian' 或 'none')
+        sigma         : 高斯滤波的标准差（仅对高斯平滑有效）
+        titles       : 可选，每个子图的标题列表
+    """
+    # 设置学术论文风格参数
+    sns.set_style("white")  # 白色背景
+    plt.rcParams.update({
+        'font.family': 'serif',  # 使用衬线字体（学术论文常用）
+        'font.serif': ['Times New Roman'],  # 具体指定Times字体
+        'font.size': 12,          # 基础字号
+        'axes.labelsize': 12,    # 坐标轴标签字号
+        'axes.titlesize': 14,     # 标题字号
+        'xtick.labelsize': 10,    # x轴刻度字号
+        'ytick.labelsize': 10,    # y轴刻度字号
+        'figure.dpi': 300        # 输出分辨率
+    })
+
+    # 确保输入为2D张量
+    for tensor in tensors:
+        tensor = tensor[0,:,:]
+        if tensor.dim() != 2:
+            raise ValueError("仅支持2D张量，当前维度: {}".format(tensor.dim()))
+
+    # ==================== 绘制平滑版本 ====================
+    plt.figure(figsize=(5 * len(tensors), 5))
+    for idx, tensor in enumerate(tensors):
+        arr = tensor.detach().cpu().numpy()[0,:,:]
+
+        # 应用高斯平滑
+        smoothed = gaussian_filter(arr, sigma=sigma)
+
+        plt.subplot(1, len(tensors), idx + 1)
+        heatmap = sns.heatmap(
+            smoothed,
+            cmap='coolwarm',  # 改用对比度更好的冷暖色系
+            annot=False,
+            cbar=True,
+            square=True,
+            xticklabels=False,
+            yticklabels=False,
+            cbar_kws={'label': 'Activation Value'},  # 添加颜色条标签
+            linewidths=0.5,  # 添加细线分隔
+            linecolor='whitesmoke',  # 浅灰色分隔线
+            # vmin=-1.0,  # 固定颜色范围（根据实际数据调整）
+            # vmax=1.0    # 固定颜色范围（根据实际数据调整）
+        )
+        cbar = heatmap.collections[0].colorbar
+        cbar.ax.tick_params(labelsize=10)  # 颜色条刻度字号
+        title = f"{titles[idx]} (Smoothed σ={sigma})" if titles else f"Tensor {idx + 1} (Smoothed)"
+        plt.title(title, fontweight='bold', pad=20)  # 加粗标题，增加间距
+
+    plt.tight_layout()
+    plt.savefig(name+'smoothed_heatmaps'+str(layer_idx)+'.png', bbox_inches='tight')
+    plt.close()
+
+    # ==================== 绘制原始版本 ====================
+    plt.figure(figsize=(5 * len(tensors), 5))
+    for idx, tensor in enumerate(tensors):
+        arr = tensor.detach().cpu().numpy()[0,:,:]
+
+        plt.subplot(1, len(tensors), idx + 1)
+        heatmap = sns.heatmap(
+            arr,
+            cmap='plasma',  # 改用高对比度的plasma色系
+            annot=False,
+            cbar=True,
+            square=True,
+            xticklabels=False,
+            yticklabels=False,
+            cbar_kws={'label': 'Activation Value'},
+            linewidths=0.5,
+            linecolor='lightgray',
+            # vmin=-1.0,  # 与平滑版本保持一致
+            # vmax=1.0
+        )
+        cbar = heatmap.collections[0].colorbar
+        cbar.ax.tick_params(labelsize=10)
+        title = f"{titles[idx]} (Raw)" if titles else f"Tensor {idx + 1} (Raw)"
+        plt.title(title, fontweight='bold', pad=20)
+
+    plt.tight_layout()
+    plt.savefig(name+'raw_heatmaps'+str(layer_idx)+'.png', bbox_inches='tight')
+    plt.close()
+# def plot_smooth_raw_heatmaps(tensors, smooth_method='gaussian', sigma=1.0, titles=None,layer_idx=0,name='name'):
+#     """
+#     绘制平滑版和原始版热图（分两个独立图像）
+#
+#     参数：
+#         tensors       : 包含PyTorch张量的列表
+#         smooth_method : 平滑方法 ('gaussian' 或 'none')
+#         sigma         : 高斯滤波的标准差（仅对高斯平滑有效）
+#         titles       : 可选，每个子图的标题列表
+#     """
+#     # 确保输入为2D张量
+#     for tensor in tensors:
+#         tensor = tensor[0,:,:]
+#         if tensor.dim() != 2:
+#             raise ValueError("仅支持2D张量，当前维度: {}".format(tensor.dim()))
+#
+#     # ==================== 绘制平滑版本 ====================
+#     plt.figure(figsize=(5 * len(tensors), 5))
+#     for idx, tensor in enumerate(tensors):
+#         arr = tensor.detach().cpu().numpy()[0,:,:]
+#
+#         # 应用高斯平滑
+#         smoothed = gaussian_filter(arr, sigma=sigma)
+#
+#         plt.subplot(1, len(tensors), idx + 1)
+#         sns.heatmap(smoothed, cmap='viridis', annot=False,
+#                     cbar=True, square=True, xticklabels=False)
+#         plt.title(f"{titles[idx]}\n(Smoothed σ={sigma}" if titles else f"Tensor {idx + 1} (Smoothed)")
+#
+#     plt.tight_layout()
+#     plt.savefig(name+'smoothed_heatmaps'+str(layer_idx)+'.png', dpi=300)
+#     plt.close()
+#
+#     # ==================== 绘制原始版本 ====================
+#     plt.figure(figsize=(5 * len(tensors), 5))
+#     for idx, tensor in enumerate(tensors):
+#         arr = tensor.detach().cpu().numpy()[0,:,:]
+#
+#         plt.subplot(1, len(tensors), idx + 1)
+#         sns.heatmap(arr, cmap='viridis', annot=False,
+#                     cbar=True, square=True, xticklabels=False)
+#         plt.title(f"{titles[idx]}\n(Raw)" if titles else f"Tensor {idx + 1} (Raw)")
+#
+#     plt.tight_layout()
+#     plt.savefig(name+'raw_heatmaps'+str(layer_idx)+'.png', dpi=300)
+#     plt.close()
+#
 
 
+def plot_line_charts(tensors, titles=None,layer_idx=0,name='0.jpg'):
+    """
+    绘制多个张量的折线图（横向排列）
+    参数：
+        tensors : 包含PyTorch张量的列表
+        titles  : 可选，每个子图的标题列表
+    """
+    # 调整画布尺寸为宽幅横向布局
+    plt.figure(figsize=(5 * len(tensors), 5))  # 宽度按子图数量扩展
+
+    for idx, tensor in enumerate(tensors):
+        # 转换张量到CPU并转为numpy
+        arr = tensor.detach().cpu().numpy()  # 统一处理设备转移
+
+        # 创建横向排列的子图 (1行N列)
+        plt.subplot(1, len(tensors), idx + 1)
+
+        # 绘制特定维度的数据（根据需求调整切片）
+        plt.plot(arr[-1, :, -1], linewidth=2, color='steelblue')  # 示例取最后一个样本的最后一列特征
+
+        # 优化可视化元素
+        plt.grid(True, alpha=0.3)
+        plt.title(titles[idx] if titles else f'Tensor {idx + 1}', fontsize=12)
+        plt.xlabel('Time Step', fontsize=10)
+        plt.ylabel('Feature Value', fontsize=10)
+        plt.xticks(rotation=45)  # 横坐标标签旋转防重叠
+
+    # 增强布局紧凑性
+    plt.tight_layout(pad=2.0)
+    plt.savefig(name+str(layer_idx)+'.png', dpi=300, bbox_inches='tight')
+    plt.close()  # 防止内存泄漏
 
 
+def analyze_components(original, trend, seasonal,chunk=25):
+    import pandas as pd
+    import numpy as np
+    from statsmodels.tsa.stattools import adfuller
+    original, trend, seasonal = original.detach().numpy(), trend.detach().numpy(), seasonal.detach().numpy()
+    # 辅助函数：数据分块
+    def chunk_data(series, window):
+        """将数据分割为不重叠的chunks（长度不足的末尾部分会被舍弃）"""
+        return [series[i:i + window] for i in range(0, len(series), window)
+                if len(series[i:i + window]) == window]
+
+    # ======================
+    # 核心分析逻辑
+    # ======================
+    def perform_analysis(series_dict,chunk):
+        """执行完整的平稳性分析流程"""
+        L = len(trend) // chunk  # 与研究论文一致的窗口长度
+
+        # 结果存储结构
+        results = {
+            'Component': [],
+            'Full_ADF_pvalue': [],
+            'Chunked_ADF_mean': [],
+            'Stationary_Chunks': []
+        }
+
+        # 对每个组件进行分析
+        for name, series in series_dict.items():
+            # 全序列ADF检验
+            full_adf = adfuller(series)
+
+            # 分块分析
+            chunks = chunk_data(series, L)
+            chunk_pvalues = [adfuller(chunk)[1] for chunk in chunks]
+            stationary_count = sum(p < 0.05 for p in chunk_pvalues)
+
+            # 记录结果
+            results['Component'].append(name)
+            results['Full_ADF_pvalue'].append(full_adf[1])
+            results['Chunked_ADF_mean'].append(np.mean(chunk_pvalues))
+            results['Stationary_Chunks'].append(stationary_count)
+
+        return pd.DataFrame(results)
+
+    # ======================
+    # 执行分析并格式化输出
+    # ======================
+    # 创建组件字典
+    components = {
+        'Original': original,
+        'Trend': trend,
+        'Seasonal': seasonal
+    }
+
+    # 执行分析
+    analysis_df = perform_analysis(components,chunk)
+
+    # 输出结果
+    print("\n全序列ADF检验结果:")
+    print(analysis_df[['Component', 'Full_ADF_pvalue']])
+
+    print("\n分块分析结果（L=28）:")
+    print(analysis_df[['Component', 'Chunked_ADF_mean', 'Stationary_Chunks']])
+
+    # 返回分析结果便于后续使用
+    return analysis_df
+
+
+# 示例用法
+# 假设已有分解好的三个组件：
+# original_series, trend_series, seasonal_series = ...
+# results = analyze_components(original_series, trend_series, seasonal_series)
 class Model(nn.Module):
     """
     TimeDART
@@ -709,22 +1279,10 @@ class Model(nn.Module):
             ])
 
         # 自适应可学习权重参数
-        self.log_var_freq = nn.Parameter(torch.log(torch.tensor(self.configs.log_var_freq)))  # 频率损失初始权重 ≈0.5
-        self.log_var_orth = nn.Parameter(torch.log(torch.tensor(self.configs.log_var_orth)))  # 正交损失初始权重 ≈0.0017
-        self.log_var_smooth = nn.Parameter(torch.log(torch.tensor(self.configs.log_var_smooth)))  # 平滑损失初始权重 ≈500
-        self.log_var_season_freq = nn.Parameter(torch.log(torch.tensor(self.configs.log_var_season_freq)))  # 季节频率初始权重 ≈0.1
-        # self.log_var_freq = nn.Parameter(torch.log(torch.tensor(1.0)))  # 频率损失初始权重 ≈0.5
-        # self.log_var_orth = nn.Parameter(torch.log(torch.tensor(300.0)))  # 正交损失初始权重 ≈0.0017
-        # self.log_var_smooth = nn.Parameter(torch.log(torch.tensor(0.001)))  # 平滑损失初始权重 ≈500
-        # self.log_var_season_freq = nn.Parameter(torch.log(torch.tensor(5.0)))  # 季节频率初始权重 ≈0.1
-
-        # self.log_var_freq = torch.tensor(self.configs.log_var_freq)
-        # self.log_var_orth = torch.tensor(self.configs.log_var_orth)
-        # self.log_var_smooth = torch.tensor(self.configs.log_var_smooth)
-        # self.log_var_season_freq = torch.tensor(self.configs.log_var_season_freq)
-
-
-
+        self.log_var_freq = nn.Parameter(torch.log(torch.tensor(0.1)))
+        self.log_var_orth = nn.Parameter(torch.log(torch.tensor(0.1)))
+        self.log_var_smooth = nn.Parameter(torch.log(torch.tensor(0.1)))
+        self.log_var_season_freq = nn.Parameter(torch.log(torch.tensor(0.1)))
         self.decomp_multi = series_decomp(95)
         self.decomp_multi_learnable = StopLearnableMultiScaleDecomp(self.configs.c_out,max_lag=63,num_scales=4,peak_threshold=0.3,distance=10)
         # self.decomp_multi_learnable_second = StopLearnableMultiScaleDecomp(self.patch_len,num_scales=4)
@@ -753,6 +1311,8 @@ class Model(nn.Module):
             for _ in range(self.denoise_layers_num)
         ])
 
+        self.decomp_mov = series_decomp(25)
+
     def pretrain(self, x,x_mask,i=0):
 
         # [batch_size, input_len, num_features]
@@ -772,11 +1332,30 @@ class Model(nn.Module):
             torch.var(x, dim=1, keepdim=True, unbiased=False) + 1e-5
         ).detach()  # [batch_size, 1, num_features]
         x = x / stdevs  # [batch_size, input_len, num_features]
+        list_ts = []
+        list_ts_mov = []
+        season_mov,trend_mov = self.decomp_mov(x)
 
+        list_ts.append(x)
+        list_ts_mov.append(x)
+        list_ts_mov.append(season_mov)
+        list_ts_mov.append(trend_mov)
         # 分解  1
         x, trend,freq_loss,orth_loss,smoothness,season_freq_loss = self.decomp_multi_learnable(x)
         # x, trend = self.decomp_multi(x)
+        list_ts.append(x)
+        list_ts.append(trend)
 
+        plot_line_charts(list_ts,['source','season','trend'],name='draw_source_dynamic_fig')
+        plot_line_charts(list_ts_mov,['source','season','trend'],name='draw_source_mov_fig')
+        # results_ts = analyze_components(list_ts[0][0,:,-1],list_ts[2][0,:,-1],list_ts[1][0,:,-1])
+        # results_ts_mov = analyze_components(list_ts_mov[0][0,:,-1],list_ts_mov[2][0,:,-1],list_ts_mov[1][0,:,-1])
+        # plot_smooth_raw_heatmaps(
+        #     list_ts,
+        #     smooth_method='gaussian',
+        #     sigma=1.5,
+        #     titles=["Feature Map 1", "Feature Map 2", "Feature Map 3"]
+        # )
         # x, trend = x,x
         # Channel Independence
         x = self.channel_independence[0](x)  # [batch_size * num_features, input_len, 1]
@@ -803,7 +1382,8 @@ class Model(nn.Module):
 
         # 分解  2
         # x_embedding_bias, _ = self.decomp_multi(x_embedding_bias)
-        # x_embedding_bias, _ = x_embedding_bias,x_embedding_
+        # x_embedding_bias, _ = x_embedding_bias,x_embedding_bias
+
         x_out = self.encoder(
             x_embedding_bias,
             is_mask=True,
@@ -860,7 +1440,39 @@ class Model(nn.Module):
 
             # 分解  5
             # noise_x_embedding, _ = noise_x_embedding,noise_x_embedding
+            x_out_list = []
+            x_out_list.append(x_out)
+            x_out_list_mov = []
+            x_out_list_mov.append(x_out)
+            season_mov, trend_mov = self.decomp_mov(x_out)
+            x_out_list_mov.append(season_mov)
+            x_out_list_mov.append(trend_mov)
+
             x_out, x_out_trend,freq_loss_inner,orth_loss_inner,smoothness_inner ,season_freq_loss_inner= self.decomp_multi_learnable_third(x_out)
+
+            x_out_list.append(x_out)
+            x_out_list.append(x_out_trend)
+            # results_ts = analyze_components(x_out_list[0][0, 0, :], x_out_list[2][0, 0, :], x_out_list[1][0, 0, :])
+            # results_ts_mov = analyze_components(x_out_list_mov[0][0, 0, :], x_out_list_mov[2][0, 0, :],
+            #                                     x_out_list_mov[1][0, 0, :])
+
+            # plot_line_charts(x_out_list, ['source', 'season', 'trend'],layer_idx,"x_out_figure_line")
+            plot_smooth_raw_heatmaps(
+                x_out_list,
+                smooth_method='gaussian',
+                sigma=1.5,
+                titles=["Feature Map 1", "Feature Map 2", "Feature Map 3"],
+                layer_idx=layer_idx,
+                name='x_out_figure_heatmap'
+            )
+            plot_smooth_raw_heatmaps(
+                x_out_list_mov,
+                smooth_method='gaussian',
+                sigma=1.5,
+                titles=["Feature Map 1", "Feature Map 2", "Feature Map 3"],
+                layer_idx=layer_idx,
+                name='x_out_figure_heatmap_mov'
+            )
             # x_out, x_out_trend = self.decomp_multi(x_out)
 
             # x_out, x_out_trend = x_out,x_out
@@ -925,13 +1537,13 @@ class Model(nn.Module):
         # return predict_x,0,0,0
         # return predict_x,total_freq,total_orth,total_smooth,total_season_freq
         if self.configs.del_orth_loss == 1:
-            total_orth = 0 # 618
+            total_orth = 0
         elif self.configs.del_smoothness_loss ==1:
-            total_smooth = 0 # 0.0025
+            total_smooth = 0
         elif self.configs.del_season_freq_loss == 1:
-            total_season_freq = 0  # 10.6285
+            total_season_freq = 0
         elif self.configs.del_freq_loss ==1:
-            total_freq = 0  # 2.3
+            total_freq = 0
         return predict_x,total_freq,total_orth,total_smooth,total_season_freq
 
     def forecast(self, x,x_mark):
@@ -946,7 +1558,57 @@ class Model(nn.Module):
         ).detach()
         x = x / stdevs
         # x, trend = self.decomp_multi(x)
+        list_ts = []
+        list_ts_mov = []
+        season_mov, trend_mov = self.decomp_mov(x)
+
+        list_ts.append(x)
+        list_ts_mov.append(x)
+        list_ts_mov.append(season_mov)
+        list_ts_mov.append(trend_mov)
+
+
         x, trend,freq_loss,orth_loss,smoothness,season_freq_loss = self.decomp_multi_learnable(x)
+        list_ts.append(x)
+        list_ts.append(trend)
+
+        plot_line_charts(list_ts, ['source', 'season', 'trend'], name='draw_source_dynamic_fig_finetune')
+        plot_line_charts(list_ts_mov, ['source', 'season', 'trend'], name='draw_source_mov_fig_finetune')
+        # results_ts = analyze_components(list_ts[0][0,:,-1],list_ts[2][0,:,-1],list_ts[1][0,:,-1])
+        # results_ts_mov = analyze_components(list_ts_mov[0][0,:,-1],list_ts_mov[2][0,:,-1],list_ts_mov[1][0,:,-1])
+
+
+
+
+        # -------------------------------
+        # 获取评估结果
+        metrics1 = comprehensive_decomposition_eval(list_ts[0][0,:,-1],list_ts[2][0,:,-1],list_ts[1][0,:,-1])
+
+        # 可视化结果
+        # pd.DataFrame(metrics1).T.style.bar(subset=['value'],
+        #                                   align='mid',
+        #                                   color=['#d65f5f', '#5fba7d'])  # 红/绿渐变色
+        metrics2 = comprehensive_decomposition_eval(list_ts_mov[0][0,:,-1],list_ts_mov[2][0,:,-1],list_ts_mov[1][0,:,-1])
+
+        # 可视化结果
+        # pd.DataFrame(metrics2).T.style.bar(subset=['value'],
+        #                                   align='mid',
+        #                                   color=['#d65f5f', '#5fba7d'])  # 红/绿渐变色
+        # 使用示例
+        table_md = create_comparison_table(metrics1, metrics2)
+        print(table_md)
+        # 对比可视化选择
+        # visualize_comparison(metrics1, metrics2, labels=['My Model', 'Baseline'])
+        # radar_plot_comparison(metrics1, metrics2, labels=['My Model', 'Baseline'])
+        # plot_metrics_comparison(metrics1, metrics2)
+        # 或生成交互式图表
+        # interactive_dashboard({
+        #     'My Model': metrics1,
+        #     'Baseline': metrics2
+        # })
+        # -------------------------------
+
+
         # x, trend = x,x
         x = self.channel_independence[0](x)  # [batch_size * num_features, input_len, 1]
         x = self.patch(x)  # [batch_size * num_features, seq_len, patch_len]
@@ -1140,6 +1802,11 @@ def get_config():
     parser.add_argument(
         "--imag_scheduler", type=str, default="quad", help="imag_scheduler in diffusion"
     )
+    # loss
+    parser.add_argument('--del_orth_loss', type=int, help='del_orth_loss', default=0)
+    parser.add_argument('--del_season_freq_loss', type=int, help='del_season_freq_loss', default=0)
+    parser.add_argument('--del_smoothness_loss', type=int, help='del_smoothness_loss', default=0)
+    parser.add_argument('--del_freq_loss', type=int, help='del_freq_loss', default=0)
 
     configs = parser.parse_args()
 
@@ -1148,11 +1815,29 @@ def get_config():
 
 
 if __name__ == '__main__':
+    # data preparation
+
+
+    folder_path = r"E:\模型数据\TimeDART相关数据\TimeDART_version2_file\outputs\checkpoints\finetune_TimeDART_ETTh1_M_il336_ll48_pl720_dm32_df64_nh16_el2_dl1_fc1_dp0.2_hdp0.1_ep10_bs16_lr0.0001_dln_1"
+    folder_path = r"E:\模型数据\TimeDART相关数据\TimeDART_version2_file\outputs\checkpoints\finetune_TimeDART_Traffic_M_il336_ll48_pl96_dm64_df128_nh16_el3_dl1_fc1_dp0.2_hdp0.1_ep10_bs8_lr0.003_dln_7"
+    # folder_path = r"E:\模型数据\TimeDART相关数据\TimeDART_version2_file\outputs\pretrain_checkpoints\Traffic"
+    # folder_path = r"E:\模型数据\TimeDART相关数据\TimeDART_version2_file\outputs\pretrain_checkpoints\ETTh1_dln_1"
+    # folder_path = r"E:\模型数据\TimeDART相关数据\TimeDART_version2_file\outputs\pretrain_checkpoints\ETTh1_dln_1"
+    if os.path.isdir(folder_path):
+        checkpoint_path = os.path.join(folder_path, 'checkpoint.pth')
+        # checkpoint_path = os.path.join(folder_path, 'ckpt_best.pth')
+        if os.path.exists(checkpoint_path):
+            state_dict = torch.load(checkpoint_path)
+            # state_dictlist = state_dict['model_state_dict']
+            state_dictlist = state_dict
+
+
     configs = get_config()
 
-    configs.task_name = 'pretrain'
+    configs.task_name = 'finetune'
 
     configs.seq_len = 336
+    configs.pred_len = 192
     configs.e_layers = 3
     configs.enc_in = 7
     configs.dec_in = 7
@@ -1165,19 +1850,85 @@ if __name__ == '__main__':
     configs.learning_rate = 0.001
     configs.batch_size = 16
     configs.train_epochs = 5
+    configs.patch_len = 2
     configs.input_len = 336
+    configs.root_path = 'traffic'
+    # configs.root_path = 'ETT-small'
+    configs.data = 'Traffic'
+    configs.data_path = 'traffic.csv'
+    configs.device = 'cpu'
 
     configs.down_sampling_layers = 2
     configs.down_sampling_window = 2
 
-    x= torch.randn(1,336,7)
-    x_mark_enc= torch.randn(16,336,4)
-    x_res= torch.randn(16,336,7)
+    configs.input_len = 336
+    configs.label_len = 48
+    configs.pred_len = 96
+    configs.e_layers = 3
+    configs.enc_in = 862
+    configs.dec_in = 862
+    configs.c_out = 862
+    configs.n_heads = 16
+    configs.d_model = 64
+    configs.d_ff = 128
+    configs.patch_len = 8
+    configs.stride = 8
+    configs.dropout = 0.2
+    configs.head_dropout = 0.1
+    configs.batch_size = 8
+    configs.denoise_layers_num = 7
+    configs.lr_decay = 0.5
+    configs.time_steps = 1000
+    configs.scheduler = 'cosine'
+    configs.patience = 3
+    configs.learning_rate = 0.003
+    configs.pct_start = 0.2
 
 
-    configs.device = x.device
+
+
+    train_data, train_loader = data_provider(configs, flag="train")
+    vali_data, vali_loader = data_provider(configs, flag="val")
+
+    # exp = Exp_TimeDART(configs)  # set experiments
+    # train_data, train_loader = exp._get_data(flag="train")
+    # vali_data, vali_loader = exp._get_data(flag="val")
+
     model = Model(configs)
-    mask = torch.ones_like(x)
-    # # x_enc 64 336 7 ; x_mark_enc 16 336 4 ； batch_x 16 336 7  mask 64 336 7
-    c = model(x,x_mark_enc)
-    d = 'end'
+
+    # 处理多GPU训练保存的权重（如果有'module.'前缀）
+    # state_dict = {k.replace('module.', ''): v for k, v in state_dictlist.items()}  # 去除前缀
+    new_pth = model.state_dict()
+    public_dict = {}
+
+    for k, v in state_dictlist.items():
+        for kk in new_pth.keys():
+            if kk in k:
+                public_dict[kk] = v
+                break
+    new_pth.update(public_dict)
+    model.load_state_dict(new_pth)
+    # 加载权重到模型
+    # model.load_state_dict(state_dictlist)
+
+    # 设置为评估模式（固定Dropout和BatchNorm）
+    model.eval()
+    for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(
+            train_loader
+    ):
+        batch_x = batch_x.float()
+        batch_y = batch_y.float()
+        batch_x_mark = batch_x_mark.float()
+        # batch_x_m = batch_x_m.float()
+
+        # batch_x= torch.randn(1,336,7)
+        # batch_y= torch.randn(16,336,4)
+        # x_res= torch.randn(16,336,7)
+
+
+        # configs.device = batch_x.device
+
+        # mask = torch.ones_like(x)
+        # # x_enc 64 336 7 ; x_mark_enc 16 336 4 ； batch_x 16 336 7  mask 64 336 7
+        c = model(batch_x,batch_y)
+        d = 'end'
