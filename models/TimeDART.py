@@ -293,7 +293,22 @@ class StopLearnableMultiScaleDecomp(nn.Module):
         # 季节项
         seasonal = x - fused_trend
 
-        # === 科学修正的损失计算 ===
+        # 频域约束（抑制高频）
+        # trend_fft = torch.fft.rfft(fused_trend, dim=-1)
+        # freq_loss = torch.mean(torch.abs(trend_fft[..., 2:]))  # 忽略前5个低频
+        # trend_freq_loss = freq_loss
+        # # 平滑性约束
+        # smooth_loss = torch.mean(torch.diff(fused_trend, n=2, dim=-1) ** 2)
+        # # smooth_loss = torch.tensor(0.0)
+        # # 正交约束
+        # orth_loss = torch.mean((seasonal * fused_trend).sum(dim=-1) ** 2)
+        # # orth_loss = torch.tensor(0.0)
+        # # total_loss = freq_loss + 0.1 * smooth_loss + 0.1 * orth_loss
+        # # 季节项高频激励（可选）
+        # seasonal_fft = torch.fft.rfft(seasonal, dim=2)  # [B,C, L//2+1]
+        # season_freq_loss = -torch.mean(torch.abs(seasonal_fft[..., 5:]))  # 激励高频
+        # recon_loss=torch.tensor(0.0)
+        # # === 科学修正的损失计算 ===
         # 1. 趋势项低频保护 + 高频抑制
         trend_fft = torch.fft.rfft(fused_trend, dim=-1)
         # 频域处理 (动态比例)
@@ -324,7 +339,7 @@ class StopLearnableMultiScaleDecomp(nn.Module):
             first_diff = torch.mean(torch.diff(fused_trend, dim=-1) ** 2)
             second_diff = torch.mean(torch.diff(fused_trend, n=2, dim=-1) ** 2)
             smooth_loss = 0.6 * second_diff + 0.4 * first_diff
-        # 重构约束
+        # # 重构约束
         recon_loss = F.l1_loss(x, seasonal + fused_trend)
         return seasonal.permute(0, 2, 1), fused_trend.permute(0, 2, 1), trend_freq_loss,orth_loss,smooth_loss,season_freq_loss,recon_loss
 def plot_tensors(tensor_list,file_name,index):
@@ -713,12 +728,15 @@ class Model(nn.Module):
 
         # 自适应可学习权重参数
         # 自适应损失权重参数
-        # 修正后的初始化参数（基于损失量级平衡）
-        self.log_var_freq = nn.Parameter(torch.tensor(self.configs.log_var_freq), requires_grad=True)  # 原-0.7 → 0.0
-        self.log_var_orth = nn.Parameter(torch.tensor(self.configs.log_var_orth), requires_grad=True)  # 原-6.9 → -3.0
-        self.log_var_smooth = nn.Parameter(torch.tensor(self.configs.log_var_smooth), requires_grad=True)  # 原0.0 → -4.0
-        self.log_var_season_freq = nn.Parameter(torch.tensor(self.configs.log_var_season_freq), requires_grad=True)  # 原-2.3 → 1.0
-        self.log_var_recon = nn.Parameter(torch.tensor(self.configs.log_var_recon), requires_grad=True)  # 原-2.3 → -10.0
+
+        # self.log_var_freq = nn.Parameter(torch.log(torch.tensor(self.configs.log_var_freq)), requires_grad=True)
+        # self.log_var_orth = nn.Parameter(torch.log(torch.tensor(self.configs.log_var_orth)), requires_grad=True)
+        # self.log_var_smooth = nn.Parameter(torch.log(torch.tensor(self.configs.log_var_smooth)), requires_grad=True)
+        # self.log_var_season_freq = nn.Parameter(torch.log(torch.tensor(self.configs.log_var_season_freq)),
+        #                                         requires_grad=True)
+        # self.log_var_recon = nn.Parameter(torch.log(torch.tensor(self.configs.log_var_recon)), requires_grad=True)
+
+
         # self.log_var_freq = nn.Parameter(torch.log(torch.tensor(1.0)))  # 频率损失初始权重 ≈0.5
         # self.log_var_orth = nn.Parameter(torch.log(torch.tensor(300.0)))  # 正交损失初始权重 ≈0.0017
         # self.log_var_smooth = nn.Parameter(torch.log(torch.tensor(0.001)))  # 平滑损失初始权重 ≈500
@@ -728,7 +746,25 @@ class Model(nn.Module):
         # self.log_var_orth = torch.tensor(self.configs.log_var_orth)
         # self.log_var_smooth = torch.tensor(self.configs.log_var_smooth)
         # self.log_var_season_freq = torch.tensor(self.configs.log_var_season_freq)
+        if self.configs.use_init_loss == 1:
+            self.log_var_freq = nn.Parameter(torch.zeros(1), requires_grad=True)
+            self.log_var_orth = nn.Parameter(torch.zeros(1), requires_grad=True)
+            self.log_var_smooth = nn.Parameter(torch.zeros(1), requires_grad=True)
+            self.log_var_season_freq = nn.Parameter(torch.zeros(1), requires_grad=True)
+            self.log_var_recon = nn.Parameter(torch.zeros(1), requires_grad=True)
+        else:
+            # 修正后的初始化参数（基于损失量级平衡）  ##  注意 这里的每个self.configs.log_var_freq表示的是方差
+            self.log_var_freq = nn.Parameter(torch.tensor(self.configs.log_var_freq), requires_grad=True)
+            self.log_var_orth = nn.Parameter(torch.tensor(self.configs.log_var_orth), requires_grad=True)
+            self.log_var_smooth = nn.Parameter(torch.tensor(self.configs.log_var_smooth), requires_grad=True)
+            self.log_var_season_freq = nn.Parameter(torch.tensor(self.configs.log_var_season_freq), requires_grad=True)
+            self.log_var_recon = nn.Parameter(torch.tensor(self.configs.log_var_recon), requires_grad=True)
 
+        # self.log_var_freq = nn.Parameter(torch.log(torch.tensor(0.1)))
+        # self.log_var_orth = nn.Parameter(torch.log(torch.tensor(0.1)))
+        # self.log_var_smooth = nn.Parameter(torch.log(torch.tensor(0.1)))
+        # self.log_var_season_freq = nn.Parameter(torch.log(torch.tensor(0.1)))
+        # self.log_var_recon = nn.Parameter(torch.log(torch.tensor(0.1)))
 
 
         self.decomp_multi = series_decomp(95)
@@ -758,6 +794,22 @@ class Model(nn.Module):
             )
             for _ in range(self.denoise_layers_num)
         ])
+    def init_adaptive_weights(self, sample_batch):
+        """ 用样本数据初始化自适应权重 """
+        with torch.no_grad():
+            _, freq_loss, orth_loss, smooth_loss, season_freq_loss, recon_loss = self.forward(sample_batch,None)
+
+            # 核心公式：log_var = log(损失值)
+            self.log_var_freq.data = freq_loss + 1e-8
+            self.log_var_orth.data = orth_loss + 1e-8
+            self.log_var_smooth.data = smooth_loss + 1e-8
+            self.log_var_season_freq.data = season_freq_loss + 1e-8
+            self.log_var_recon.data = recon_loss + 1e-8
+            # self.log_var_freq.data = torch.log(freq_loss + 1e-8)
+            # self.log_var_orth.data = torch.log(orth_loss + 1e-8)
+            # self.log_var_smooth.data = torch.log(smooth_loss + 1e-8)
+            # self.log_var_season_freq.data = torch.log(season_freq_loss + 1e-8)
+            # self.log_var_recon.data = torch.log(recon_loss + 1e-8)
 
     def pretrain(self, x,x_mask,i=0):
 

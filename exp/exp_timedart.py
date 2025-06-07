@@ -167,6 +167,13 @@ class Exp_TimeDART(Exp_Basic):
         total_epoch = len(train_loader)
 
         self.model.train()
+        if self.args.use_init_loss == 1:
+
+            simple_batch_x, simple_batch_y, simple_batch_x_mark, simple_batch_y_mark = next(iter(train_loader))  # 获取一个批次
+            simple_batch_x = simple_batch_x.float().to(self.device)
+
+            self.model.init_adaptive_weights(simple_batch_x)
+
         for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(
             train_loader
         ):
@@ -175,15 +182,15 @@ class Exp_TimeDART(Exp_Basic):
             mask_rate = 0.5
             lm = 3
             positive_nums = 1
-            batch_x_m, batch_x_mark_m, mask = masked_data(batch_x, batch_x_mark, mask_rate, lm,
-                                                          positive_nums)
+            # batch_x_m, batch_x_mark_m, mask = masked_data(batch_x, batch_x_mark, mask_rate, lm,
+            #                                               positive_nums)
 
             batch_x = batch_x.float().to(self.device)
             batch_y = batch_y.float().to(self.device)
             batch_x_mark = batch_x_mark.float().to(self.device)
 
 
-            batch_x_m = batch_x_m.float().to(self.device)
+            # batch_x_m = batch_x_m.float().to(self.device)
 
             if self.args.model == 'TimeDART_my':
             # pred_x = self.model(batch_x)
@@ -191,7 +198,7 @@ class Exp_TimeDART(Exp_Basic):
                 # diff_loss.requires_grad = True
             # diff_loss = model_criterion(pred_x, batch_x)
             elif self.args.model == 'TimeDART':
-                pred_x,freq_loss,orth_loss,smoothness,season_freq_loss,recon_loss = self.model(batch_x,batch_x_m,i)
+                pred_x,freq_loss,orth_loss,smoothness,season_freq_loss,recon_loss = self.model(batch_x,batch_y,i)
                 # diff_loss = self.model(batch_x)
 
                 diff_loss = model_criterion(pred_x, batch_x)
@@ -200,23 +207,35 @@ class Exp_TimeDART(Exp_Basic):
                 print("diff_loss="+str(diff_loss.item()),"freq_loss=" + str(freq_loss.item()),"orth_loss=" + str(orth_loss.item()),"smoothness="+str(smoothness.item()),"season_freq_loss=" + str(season_freq_loss.item()),"recon_loss="+str(recon_loss.item()))
 
                 # 自适应权重计算（不确定权重法）
-                loss_freq = 1 / (2 * torch.exp(self.model.log_var_freq)) * freq_loss + 0.5 * self.model.log_var_freq
-                loss_orth = 1 / (2 * torch.exp(self.model.log_var_orth)) * orth_loss + 0.5 * self.model.log_var_orth
+                # loss_freq = 1 / (2 * torch.exp(self.model.log_var_freq)) * freq_loss# + 0.5 * self.model.log_var_freq
+                # loss_orth = 1 / (2 * torch.exp(self.model.log_var_orth)) * orth_loss #+ 0.5 * self.model.log_var_orth
+                # loss_smooth = 1 / (
+                #             2 * torch.exp(self.model.log_var_smooth)) * smoothness #+ 0.5 * self.model.log_var_smooth
+                # loss_season_freq = 1 / (2 * torch.exp(
+                #     self.model.log_var_season_freq)) * season_freq_loss #+ 0.5 * self.model.log_var_season_freq
+                # loss_recon = 1 / (2 * torch.exp(self.model.log_var_recon)) * recon_loss #+ 0.5 * self.model.log_var_recon
+
+
+
+                loss_freq = 1 / (2 * self.model.log_var_freq) * freq_loss + 0.5 * torch.log(self.model.log_var_freq)
+
+                loss_orth = 1 / (2 * self.model.log_var_orth) * orth_loss + 0.5 * torch.log(self.model.log_var_orth)
+
                 loss_smooth = 1 / (
-                            2 * torch.exp(self.model.log_var_smooth)) * smoothness + 0.5 * self.model.log_var_smooth
-                loss_season_freq = 1 / (2 * torch.exp(
-                    self.model.log_var_season_freq)) * season_freq_loss + 0.5 * self.model.log_var_season_freq
-                loss_recon = 1 / (2 * torch.exp(self.model.log_var_recon)) * recon_loss + 0.5 * self.model.log_var_recon
+                            2 * self.model.log_var_smooth) * smoothness + 0.5 * torch.log(self.model.log_var_smooth)
+                loss_season_freq = 1 / (2 *
+                    self.model.log_var_season_freq) * season_freq_loss + 0.5 * torch.log(self.model.log_var_season_freq)
+                loss_recon = 1 / (2 * self.model.log_var_recon) * recon_loss + 0.5 * torch.log(self.model.log_var_recon)
                 if self.args.del_orth_loss == 1:
-                    loss_orth = 0  # 618
-                elif self.args.del_smoothness_loss == 1:
-                    loss_smooth = 0  # 0.0025
-                elif self.args.del_season_freq_loss == 1:
-                    loss_season_freq = 0  # 10.6285
-                elif self.args.del_freq_loss == 1:
-                    loss_freq = 0  # 2.3
-                elif self.args.del_recon_loss == 1:
-                    loss_recon = 0
+                    loss_orth = torch.tensor(0.0)  # 618
+                if self.args.del_smoothness_loss == 1:
+                    loss_smooth = torch.tensor(0.0)  # 0.0025
+                if self.args.del_season_freq_loss == 1:
+                    loss_season_freq = torch.tensor(0.0)  # 10.6285
+                if self.args.del_freq_loss == 1:
+                    loss_freq = torch.tensor(0.0)  # 2.3
+                if self.args.del_recon_loss == 1:
+                    loss_recon = torch.tensor(0.0)
                 # loss_freq = 0.01 * freq_loss
                 # loss_orth = 0.1 * orth_loss
                 # loss_smooth = 0.1 * smoothness
@@ -239,11 +258,11 @@ class Exp_TimeDART(Exp_Basic):
 
                     # 打印正则项贡献
                     print("\nRegularization Terms:")
-                    print(f"  freq_reg: {0.5 * self.model.log_var_freq.item():.4f}")
-                    print(f"  orth_reg: {0.5 * self.model.log_var_orth.item():.4f}")
-                    print(f"  smooth_reg: {0.5 * self.model.log_var_smooth.item():.4f}")
-                    print(f"  season_reg: {0.5 * self.model.log_var_season_freq.item():.4f}")
-                    print(f"  recon_reg: {0.5 * self.model.log_var_recon.item():.4f}")
+                    print(f"  freq_reg: {0.5 * torch.log(self.model.log_var_freq).item():.4f}")
+                    print(f"  orth_reg: {0.5 * torch.log(self.model.log_var_orth).item():.4f}")
+                    print(f"  smooth_reg: {0.5 * torch.log(self.model.log_var_smooth).item():.4f}")
+                    print(f"  season_reg: {0.5 * torch.log(self.model.log_var_season_freq).item():.4f}")
+                    print(f"  recon_reg: {0.5 * torch.log(self.model.log_var_recon).item():.4f}")
 
                     # 打印总损失组成
                     print("\nTotal Loss Breakdown:")
@@ -256,7 +275,7 @@ class Exp_TimeDART(Exp_Basic):
                 # -----
 
             else:
-                pred_x, = self.model(batch_x,batch_x_m,i)
+                pred_x, = self.model(batch_x,None,i)
                 # diff_loss = self.model(batch_x)
                 diff_loss = model_criterion(pred_x, batch_x)
             # diff_loss.requires_grad = True
@@ -343,6 +362,13 @@ class Exp_TimeDART(Exp_Basic):
             print("Current learning rate: {:.7f}".format(model_scheduler.get_last_lr()[0]))
 
             self.model.train()
+            if self.args.use_init_loss == 1:
+                simple_batch_x, simple_batch_y, simple_batch_x_mark, simple_batch_y_mark = next(
+                    iter(train_loader))  # 获取一个批次
+                simple_batch_x = simple_batch_x.float().to(self.device)
+
+                self.model.init_adaptive_weights(simple_batch_x)
+
             start_time = time.time()
 
             for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(
@@ -358,11 +384,17 @@ class Exp_TimeDART(Exp_Basic):
                 pred_x, freq_loss, orth_loss, smoothness,season_freq_loss ,recon_loss= self.model(batch_x,batch_x_mark)
 
                 # 自适应权重计算（不确定权重法）
-                loss_freq = 1/(2*torch.exp(self.model.log_var_freq)) * freq_loss + 0.5*self.model.log_var_freq
-                loss_orth = 1/(2*torch.exp(self.model.log_var_orth)) * orth_loss + 0.5*self.model.log_var_orth
-                loss_smooth = 1/(2*torch.exp(self.model.log_var_smooth)) * smoothness + 0.5*self.model.log_var_smooth
-                loss_season_freq = 1/(2*torch.exp(self.model.log_var_season_freq)) * season_freq_loss + 0.5*self.model.log_var_season_freq
-                loss_recon = 1/(2*torch.exp(self.model.log_var_recon)) * recon_loss + 0.5*self.model.log_var_recon
+                # loss_freq = 1/(2*torch.exp(self.model.log_var_freq)) * freq_loss #+ 0.5*self.model.log_var_freq
+                # loss_orth = 1/(2*torch.exp(self.model.log_var_orth)) * orth_loss #+ 0.5*self.model.log_var_orth
+                # loss_smooth = 1/(2*torch.exp(self.model.log_var_smooth)) * smoothness #+ 0.5*self.model.log_var_smooth
+                # loss_season_freq = 1/(2*torch.exp(self.model.log_var_season_freq)) * season_freq_loss #+ 0.5*self.model.log_var_season_freq
+                # loss_recon = 1/(2*torch.exp(self.model.log_var_recon)) * recon_loss #+ 0.5*self.model.log_var_recon
+
+                loss_freq = 1 / (2 * self.model.log_var_freq) * freq_loss + 0.5*torch.log(self.model.log_var_freq)
+                loss_orth = 1 / (2 * self.model.log_var_orth) * orth_loss + 0.5*torch.log(self.model.log_var_orth)
+                loss_smooth = 1 / (2 * self.model.log_var_smooth) * smoothness + 0.5*torch.log(self.model.log_var_smooth)
+                loss_season_freq = 1 / (2 * self.model.log_var_season_freq) * season_freq_loss + 0.5*torch.log(self.model.log_var_season_freq)
+                loss_recon = 1 / (2 * self.model.log_var_recon) * recon_loss + 0.5*torch.log(self.model.log_var_recon)
                 # loss_freq = 0.01 * freq_loss
                 # loss_orth = 0.1 * orth_loss
                 # loss_smooth = 0.1 * smoothness
@@ -373,15 +405,15 @@ class Exp_TimeDART(Exp_Basic):
 
                 loss = model_criteria(pred_x, batch_y)
                 if self.args.del_orth_loss == 1:
-                    loss_orth = 0  # 618
-                elif self.args.del_smoothness_loss == 1:
-                    loss_smooth = 0  # 0.0025
-                elif self.args.del_season_freq_loss == 1:
-                    loss_season_freq = 0  # 10.6285
-                elif self.args.del_freq_loss == 1:
-                    loss_freq = 0  # 2.3
-                elif self.args.del_recon_loss == 1:
-                    loss_recon = 0
+                    loss_orth = torch.tensor(0.0)  # 618
+                if self.args.del_smoothness_loss == 1:
+                    loss_smooth = torch.tensor(0.0)  # 0.0025
+                if self.args.del_season_freq_loss == 1:
+                    loss_season_freq = torch.tensor(0.0)  # 10.6285
+                if self.args.del_freq_loss == 1:
+                    loss_freq = torch.tensor(0.0)  # 2.3
+                if self.args.del_recon_loss == 1:
+                    loss_recon = torch.tensor(0.0)
                 loss = loss + loss_freq + loss_orth + loss_smooth + loss_season_freq +loss_recon
 
 
@@ -402,11 +434,11 @@ class Exp_TimeDART(Exp_Basic):
 
                     # 打印正则项贡献
                     print("\nRegularization Terms:")
-                    print(f"  freq_reg: {0.5 * self.model.log_var_freq.item():.4f}")
-                    print(f"  orth_reg: {0.5 * self.model.log_var_orth.item():.4f}")
-                    print(f"  smooth_reg: {0.5 * self.model.log_var_smooth.item():.4f}")
-                    print(f"  season_reg: {0.5 * self.model.log_var_season_freq.item():.4f}")
-                    print(f"  recon_reg: {0.5 * self.model.log_var_recon.item():.4f}")
+                    print(f"  freq_reg: {0.5 * torch.log(self.model.log_var_freq).item():.4f}")
+                    print(f"  orth_reg: {0.5 * torch.log(self.model.log_var_orth).item():.4f}")
+                    print(f"  smooth_reg: {0.5 * torch.log(self.model.log_var_smooth).item():.4f}")
+                    print(f"  season_reg: {0.5 * torch.log(self.model.log_var_season_freq).item():.4f}")
+                    print(f"  recon_reg: {0.5 * torch.log(self.model.log_var_recon).item():.4f}")
 
                     # 打印总损失组成
                     print("\nTotal Loss Breakdown:")

@@ -222,6 +222,7 @@ parser.add_argument('--log_var_smooth',type=float,help='del_smoothness_loss', de
 parser.add_argument('--log_var_season_freq', type=float, help='del_freq_loss', default=4.0)
 
 parser.add_argument('--log_var_recon', type=float, help='del_freq_loss', default=0.1)
+parser.add_argument('--use_init_loss', type=int, help='del_freq_loss', default=0)
 
 
 args = parser.parse_args()

@@ -1,55 +1,55 @@
 if [ ! -d "./run_log" ]; then
     mkdir ./run_log
 fi
-if [ ! -d "./run_log/log_202506022128_win" ]; then
-    mkdir ./run_log/log_202506022128_win
+if [ ! -d "./run_log/log_20250607153012_win" ]; then
+    mkdir ./run_log/log_20250607153012_win
 fi
-if [ ! -d "./run_log/log_202506022128_win/ETTm1" ]; then
-    mkdir ./run_log/log_202506022128_win/ETTm1
+if [ ! -d "./run_log/log_20250607153012_win/ETTm1" ]; then
+    mkdir ./run_log/log_20250607153012_win/ETTm1
 fi
-if [ ! -d "./run_log/log_202506022128_win/ETTh1" ]; then
-    mkdir ./run_log/log_202506022128_win/ETTh1
+if [ ! -d "./run_log/log_20250607153012_win/ETTh1" ]; then
+    mkdir ./run_log/log_20250607153012_win/ETTh1
 fi
-if [ ! -d "./run_log/log_202506022128_win/ETTm2" ]; then
-    mkdir ./run_log/log_202506022128_win/ETTm2
-fi
-
-if [ ! -d "./run_log/log_202506022128_win/ETTh2" ]; then
-    mkdir ./run_log/log_202506022128_win/ETTh2
-fi
-if [ ! -d "./run_log/log_202506022128_win/electricity" ]; then
-    mkdir ./run_log/log_202506022128_win/electricity
+if [ ! -d "./run_log/log_20250607153012_win/ETTm2" ]; then
+    mkdir ./run_log/log_20250607153012_win/ETTm2
 fi
 
-if [ ! -d "./run_log/log_202506022128_win/Exchange" ]; then
-    mkdir ./run_log/log_202506022128_win/Exchange
+if [ ! -d "./run_log/log_20250607153012_win/ETTh2" ]; then
+    mkdir ./run_log/log_20250607153012_win/ETTh2
+fi
+if [ ! -d "./run_log/log_20250607153012_win/electricity" ]; then
+    mkdir ./run_log/log_20250607153012_win/electricity
 fi
 
-#if [ ! -d "./run_log/log_202506022128_win/Solar" ]; then
-#    mkdir ./run_log/log_202506022128_win/Solar
+if [ ! -d "./run_log/log_20250607153012_win/Exchange" ]; then
+    mkdir ./run_log/log_20250607153012_win/Exchange
+fi
+
+#if [ ! -d "./run_log/log_20250607153012_win/Solar" ]; then
+#    mkdir ./run_log/log_20250607153012_win/Solar
 #fi
 
-if [ ! -d "./run_log/log_202506022128_win/weather" ]; then
-    mkdir ./run_log/log_202506022128_win/weather
+if [ ! -d "./run_log/log_20250607153012_win/weather" ]; then
+    mkdir ./run_log/log_20250607153012_win/weather
 fi
 
-if [ ! -d "./run_log/log_202506022128_win/Traffic" ]; then
-    mkdir ./run_log/log_202506022128_win/Traffic
+if [ ! -d "./run_log/log_20250607153012_win/Traffic" ]; then
+    mkdir ./run_log/log_20250607153012_win/Traffic
 fi
 #
-#if [ ! -d "./run_log/log_202506022128_win/PEMS03" ]; then
-#    mkdir ./run_log/log_202506022128_win/PEMS03
+#if [ ! -d "./run_log/log_20250607153012_win/PEMS03" ]; then
+#    mkdir ./run_log/log_20250607153012_win/PEMS03
 #fi
 #
-#if [ ! -d "./run_log/log_202506022128_win/PEMS04" ]; then
-#    mkdir ./run_log/log_202506022128_win/PEMS04
+#if [ ! -d "./run_log/log_20250607153012_win/PEMS04" ]; then
+#    mkdir ./run_log/log_20250607153012_win/PEMS04
 #fi
 #
-#if [ ! -d "./run_log/log_202506022128_win/PEMS07" ]; then
-#    mkdir ./run_log/log_202506022128_win/PEMS07
+#if [ ! -d "./run_log/log_20250607153012_win/PEMS07" ]; then
+#    mkdir ./run_log/log_20250607153012_win/PEMS07
 #fi
-#if [ ! -d "./run_log/log_202506022128_win/PEMS08" ]; then
-#    mkdir ./run_log/log_202506022128_win/PEMS08
+#if [ ! -d "./run_log/log_20250607153012_win/PEMS08" ]; then
+#    mkdir ./run_log/log_20250607153012_win/PEMS08
 #fi
 
 
@@ -58,6 +58,7 @@ fi
 #上个个版本  2213
 #这个版本 3322
 
+use_init_loss=0
 
 #------------------------
 del_orth_loss=0
@@ -115,9 +116,9 @@ python -u run.py \
     --log_var_orth $log_var_orth \
     --log_var_smooth $log_var_smooth \
     --log_var_season_freq $log_var_season_freq \
-    --down_sampling_layer 2 \
+    --use_init_loss $use_init_loss \
     --down_sampling_window 2 \
-> ./run_log/log_202506022128_win/ETTh1/'TimeDART_pretrain_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
+> ./run_log/log_20250607153012_win/ETTh1/'TimeDART_pretrain_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
 
 for pred_len in   96 192 336 720; do
 echo "ETTh1 $denoise_layers_num _ $pred_len"
@@ -164,9 +165,9 @@ echo "ETTh1 $denoise_layers_num _ $pred_len"
         --log_var_orth $log_var_orth \
         --log_var_smooth $log_var_smooth \
         --log_var_season_freq $log_var_season_freq \
-        --down_sampling_layer 2 \
+        --use_init_loss $use_init_loss \
         --down_sampling_window 2 \
-> ./run_log/log_202506022128_win/ETTh1/'TimeDART_finetune'$pred_len'_'$denoise_layers_num'_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
+> ./run_log/log_20250607153012_win/ETTh1/'TimeDART_finetune'$pred_len'_'$denoise_layers_num'_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
 done
 
 
@@ -219,9 +220,9 @@ python -u run.py \
     --log_var_orth $log_var_orth \
     --log_var_smooth $log_var_smooth \
     --log_var_season_freq $log_var_season_freq \
-    --down_sampling_layer 2 \
+    --use_init_loss $use_init_loss \
     --down_sampling_window 2 \
-> ./run_log/log_202506022128_win/ETTh2/'TimeDART_pretrain_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
+> ./run_log/log_20250607153012_win/ETTh2/'TimeDART_pretrain_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
 
 
 
@@ -270,9 +271,9 @@ echo "ETTh2 $denoise_layers_num _ $pred_len"
         --log_var_season_freq $log_var_season_freq \
         --learning_rate 0.0001 \
         --pct_start 0.3 \
-        --down_sampling_layer 2 \
+        --use_init_loss $use_init_loss \
         --down_sampling_window 2 \
-> ./run_log/log_202506022128_win/ETTh2/'TimeDART_finetune'$pred_len'_'$denoise_layers_num'_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
+> ./run_log/log_20250607153012_win/ETTh2/'TimeDART_finetune'$pred_len'_'$denoise_layers_num'_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
 
 done
 
@@ -323,9 +324,9 @@ python -u run.py \
     --log_var_orth $log_var_orth \
     --log_var_smooth $log_var_smooth \
     --log_var_season_freq $log_var_season_freq \
-    --down_sampling_layer 2 \
+    --use_init_loss $use_init_loss \
     --down_sampling_window 2 \
-> ./run_log/log_202506022128_win/ETTm1/'TimeDART_pretrain_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
+> ./run_log/log_20250607153012_win/ETTm1/'TimeDART_pretrain_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
 
 for pred_len in 96 192 336 720; do
 echo "ETTm1 $denoise_layers_num _ $pred_len"
@@ -372,9 +373,9 @@ echo "ETTm1 $denoise_layers_num _ $pred_len"
         --patience 3 \
         --learning_rate 0.0001 \
         --pct_start 0.3 \
-       --down_sampling_layer 2 \
+       --use_init_loss $use_init_loss \
        --down_sampling_window 2 \
-> ./run_log/log_202506022128_win/ETTm1/'TimeDART_finetune'$pred_len'_'$denoise_layers_num'_'0.01.log 2>&1
+> ./run_log/log_20250607153012_win/ETTm1/'TimeDART_finetune'$pred_len'_'$denoise_layers_num'_'0.01.log 2>&1
 
 done
 
@@ -427,9 +428,9 @@ python -u run.py \
     --log_var_smooth $log_var_smooth \
     --log_var_season_freq $log_var_season_freq \
     --train_epochs 10 \
-    --down_sampling_layer 2 \
+    --use_init_loss $use_init_loss \
     --down_sampling_window 2 \
-> ./run_log/log_202506022128_win/ETTm2/'TimeDART_pretrain_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
+> ./run_log/log_20250607153012_win/ETTm2/'TimeDART_pretrain_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
 
 
 
@@ -478,9 +479,9 @@ echo "ETTm2 $denoise_layers_num _ $pred_len"
         --log_var_smooth $log_var_smooth \
         --log_var_season_freq $log_var_season_freq \
         --pct_start 0.2 \
-       --down_sampling_layer 2 \
+       --use_init_loss $use_init_loss \
        --down_sampling_window 2 \
-> ./run_log/log_202506022128_win/ETTm2/'TimeDART_finetune'$pred_len'_'$denoise_layers_num'_'0.01.log 2>&1
+> ./run_log/log_20250607153012_win/ETTm2/'TimeDART_finetune'$pred_len'_'$denoise_layers_num'_'0.01.log 2>&1
 
 done
 log_var_freq=0.2
@@ -529,9 +530,9 @@ python -u run.py \
     --learning_rate 0.001 \
     --batch_size 16 \
     --train_epochs 10 \
-    --down_sampling_layer 2 \
+    --use_init_loss $use_init_loss \
     --down_sampling_window 2 \
-> ./run_log/log_202506022128_win/weather/'TimeDART_pretrain_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
+> ./run_log/log_20250607153012_win/weather/'TimeDART_pretrain_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
 
 
 
@@ -580,9 +581,9 @@ echo "Weather $denoise_layers_num _ $pred_len"
         --patience 3 \
         --learning_rate 0.0004 \
         --pct_start 0.3 \
-    --down_sampling_layer 2 \
+    --use_init_loss $use_init_loss \
     --down_sampling_window 2 \
-> ./run_log/log_202506022128_win/weather/'TimeDART_finetune'$pred_len'_'$denoise_layers_num'_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
+> ./run_log/log_20250607153012_win/weather/'TimeDART_finetune'$pred_len'_'$denoise_layers_num'_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
 
 done
 
@@ -653,9 +654,9 @@ python -u run.py \
     --log_var_orth $log_var_orth \
     --log_var_smooth $log_var_smooth \
     --log_var_season_freq $log_var_season_freq \
-    --down_sampling_layer 2 \
+    --use_init_loss $use_init_loss \
     --down_sampling_window 2 \
-> ./run_log/log_202506022128_win/ETTh1/'TimeDART_pretrain_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
+> ./run_log/log_20250607153012_win/ETTh1/'TimeDART_pretrain_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
 
 for pred_len in   96 192 336 720; do
 echo "ETTh1 $denoise_layers_num _ $pred_len"
@@ -702,9 +703,9 @@ echo "ETTh1 $denoise_layers_num _ $pred_len"
         --log_var_orth $log_var_orth \
         --log_var_smooth $log_var_smooth \
         --log_var_season_freq $log_var_season_freq \
-        --down_sampling_layer 2 \
+        --use_init_loss $use_init_loss \
         --down_sampling_window 2 \
-> ./run_log/log_202506022128_win/ETTh1/'TimeDART_finetune'$pred_len'_'$denoise_layers_num'_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
+> ./run_log/log_20250607153012_win/ETTh1/'TimeDART_finetune'$pred_len'_'$denoise_layers_num'_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
 done
 
 
@@ -757,9 +758,9 @@ python -u run.py \
     --log_var_orth $log_var_orth \
     --log_var_smooth $log_var_smooth \
     --log_var_season_freq $log_var_season_freq \
-    --down_sampling_layer 2 \
+    --use_init_loss $use_init_loss \
     --down_sampling_window 2 \
-> ./run_log/log_202506022128_win/ETTh2/'TimeDART_pretrain_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
+> ./run_log/log_20250607153012_win/ETTh2/'TimeDART_pretrain_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
 
 
 
@@ -808,9 +809,9 @@ echo "ETTh2 $denoise_layers_num _ $pred_len"
         --log_var_season_freq $log_var_season_freq \
         --learning_rate 0.0001 \
         --pct_start 0.3 \
-        --down_sampling_layer 2 \
+        --use_init_loss $use_init_loss \
         --down_sampling_window 2 \
-> ./run_log/log_202506022128_win/ETTh2/'TimeDART_finetune'$pred_len'_'$denoise_layers_num'_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
+> ./run_log/log_20250607153012_win/ETTh2/'TimeDART_finetune'$pred_len'_'$denoise_layers_num'_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
 
 done
 
@@ -861,9 +862,9 @@ python -u run.py \
     --log_var_orth $log_var_orth \
     --log_var_smooth $log_var_smooth \
     --log_var_season_freq $log_var_season_freq \
-    --down_sampling_layer 2 \
+    --use_init_loss $use_init_loss \
     --down_sampling_window 2 \
-> ./run_log/log_202506022128_win/ETTm1/'TimeDART_pretrain_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
+> ./run_log/log_20250607153012_win/ETTm1/'TimeDART_pretrain_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
 
 for pred_len in 720; do
 echo "ETTm1 $denoise_layers_num _ $pred_len"
@@ -910,9 +911,9 @@ echo "ETTm1 $denoise_layers_num _ $pred_len"
         --patience 3 \
         --learning_rate 0.0001 \
         --pct_start 0.3 \
-       --down_sampling_layer 2 \
+       --use_init_loss $use_init_loss \
        --down_sampling_window 2 \
-> ./run_log/log_202506022128_win/ETTm1/'TimeDART_finetune'$pred_len'_'$denoise_layers_num'_'0.01.log 2>&1
+> ./run_log/log_20250607153012_win/ETTm1/'TimeDART_finetune'$pred_len'_'$denoise_layers_num'_'0.01.log 2>&1
 
 done
 
@@ -965,9 +966,9 @@ python -u run.py \
     --log_var_smooth $log_var_smooth \
     --log_var_season_freq $log_var_season_freq \
     --train_epochs 10 \
-    --down_sampling_layer 2 \
+    --use_init_loss $use_init_loss \
     --down_sampling_window 2 \
-> ./run_log/log_202506022128_win/ETTm2/'TimeDART_pretrain_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
+> ./run_log/log_20250607153012_win/ETTm2/'TimeDART_pretrain_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
 
 
 
@@ -1016,9 +1017,9 @@ echo "ETTm2 $denoise_layers_num _ $pred_len"
         --log_var_smooth $log_var_smooth \
         --log_var_season_freq $log_var_season_freq \
         --pct_start 0.2 \
-       --down_sampling_layer 2 \
+       --use_init_loss $use_init_loss \
        --down_sampling_window 2 \
-> ./run_log/log_202506022128_win/ETTm2/'TimeDART_finetune'$pred_len'_'$denoise_layers_num'_'0.01.log 2>&1
+> ./run_log/log_20250607153012_win/ETTm2/'TimeDART_finetune'$pred_len'_'$denoise_layers_num'_'0.01.log 2>&1
 
 done
 log_var_freq=0.2
@@ -1067,9 +1068,9 @@ python -u run.py \
     --learning_rate 0.001 \
     --batch_size 16 \
     --train_epochs 10 \
-    --down_sampling_layer 2 \
+    --use_init_loss $use_init_loss \
     --down_sampling_window 2 \
-> ./run_log/log_202506022128_win/weather/'TimeDART_pretrain_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
+> ./run_log/log_20250607153012_win/weather/'TimeDART_pretrain_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
 
 
 
@@ -1118,9 +1119,9 @@ echo "Weather $denoise_layers_num _ $pred_len"
         --patience 3 \
         --learning_rate 0.0004 \
         --pct_start 0.3 \
-    --down_sampling_layer 2 \
+    --use_init_loss $use_init_loss \
     --down_sampling_window 2 \
-> ./run_log/log_202506022128_win/weather/'TimeDART_finetune'$pred_len'_'$denoise_layers_num'_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
+> ./run_log/log_20250607153012_win/weather/'TimeDART_finetune'$pred_len'_'$denoise_layers_num'_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
 
 done
 
@@ -1188,9 +1189,9 @@ python -u run.py \
     --log_var_orth $log_var_orth \
     --log_var_smooth $log_var_smooth \
     --log_var_season_freq $log_var_season_freq \
-    --down_sampling_layer 2 \
+    --use_init_loss $use_init_loss \
     --down_sampling_window 2 \
-> ./run_log/log_202506022128_win/ETTh1/'TimeDART_pretrain_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
+> ./run_log/log_20250607153012_win/ETTh1/'TimeDART_pretrain_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
 
 for pred_len in   96 192 336 720; do
 echo "ETTh1 $denoise_layers_num _ $pred_len"
@@ -1237,9 +1238,9 @@ echo "ETTh1 $denoise_layers_num _ $pred_len"
         --log_var_orth $log_var_orth \
         --log_var_smooth $log_var_smooth \
         --log_var_season_freq $log_var_season_freq \
-        --down_sampling_layer 2 \
+        --use_init_loss $use_init_loss \
         --down_sampling_window 2 \
-> ./run_log/log_202506022128_win/ETTh1/'TimeDART_finetune'$pred_len'_'$denoise_layers_num'_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
+> ./run_log/log_20250607153012_win/ETTh1/'TimeDART_finetune'$pred_len'_'$denoise_layers_num'_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
 done
 
 
@@ -1292,9 +1293,9 @@ python -u run.py \
     --log_var_orth $log_var_orth \
     --log_var_smooth $log_var_smooth \
     --log_var_season_freq $log_var_season_freq \
-    --down_sampling_layer 2 \
+    --use_init_loss $use_init_loss \
     --down_sampling_window 2 \
-> ./run_log/log_202506022128_win/ETTh2/'TimeDART_pretrain_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
+> ./run_log/log_20250607153012_win/ETTh2/'TimeDART_pretrain_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
 
 
 
@@ -1343,9 +1344,9 @@ echo "ETTh2 $denoise_layers_num _ $pred_len"
         --log_var_season_freq $log_var_season_freq \
         --learning_rate 0.0001 \
         --pct_start 0.3 \
-        --down_sampling_layer 2 \
+        --use_init_loss $use_init_loss \
         --down_sampling_window 2 \
-> ./run_log/log_202506022128_win/ETTh2/'TimeDART_finetune'$pred_len'_'$denoise_layers_num'_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
+> ./run_log/log_20250607153012_win/ETTh2/'TimeDART_finetune'$pred_len'_'$denoise_layers_num'_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
 
 done
 
@@ -1396,9 +1397,9 @@ python -u run.py \
     --log_var_orth $log_var_orth \
     --log_var_smooth $log_var_smooth \
     --log_var_season_freq $log_var_season_freq \
-    --down_sampling_layer 2 \
+    --use_init_loss $use_init_loss \
     --down_sampling_window 2 \
-> ./run_log/log_202506022128_win/ETTm1/'TimeDART_pretrain_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
+> ./run_log/log_20250607153012_win/ETTm1/'TimeDART_pretrain_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
 
 for pred_len in 96 192 336 720; do
 echo "ETTm1 $denoise_layers_num _ $pred_len"
@@ -1445,9 +1446,9 @@ echo "ETTm1 $denoise_layers_num _ $pred_len"
         --patience 3 \
         --learning_rate 0.0001 \
         --pct_start 0.3 \
-       --down_sampling_layer 2 \
+       --use_init_loss $use_init_loss \
        --down_sampling_window 2 \
-> ./run_log/log_202506022128_win/ETTm1/'TimeDART_finetune'$pred_len'_'$denoise_layers_num'_'0.01.log 2>&1
+> ./run_log/log_20250607153012_win/ETTm1/'TimeDART_finetune'$pred_len'_'$denoise_layers_num'_'0.01.log 2>&1
 
 done
 
@@ -1500,9 +1501,9 @@ python -u run.py \
     --log_var_smooth $log_var_smooth \
     --log_var_season_freq $log_var_season_freq \
     --train_epochs 10 \
-    --down_sampling_layer 2 \
+    --use_init_loss $use_init_loss \
     --down_sampling_window 2 \
-> ./run_log/log_202506022128_win/ETTm2/'TimeDART_pretrain_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
+> ./run_log/log_20250607153012_win/ETTm2/'TimeDART_pretrain_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
 
 
 
@@ -1551,9 +1552,9 @@ echo "ETTm2 $denoise_layers_num _ $pred_len"
         --log_var_smooth $log_var_smooth \
         --log_var_season_freq $log_var_season_freq \
         --pct_start 0.2 \
-       --down_sampling_layer 2 \
+       --use_init_loss $use_init_loss \
        --down_sampling_window 2 \
-> ./run_log/log_202506022128_win/ETTm2/'TimeDART_finetune'$pred_len'_'$denoise_layers_num'_'0.01.log 2>&1
+> ./run_log/log_20250607153012_win/ETTm2/'TimeDART_finetune'$pred_len'_'$denoise_layers_num'_'0.01.log 2>&1
 
 done
 log_var_freq=0.2
@@ -1602,9 +1603,9 @@ python -u run.py \
     --learning_rate 0.001 \
     --batch_size 16 \
     --train_epochs 10 \
-    --down_sampling_layer 2 \
+    --use_init_loss $use_init_loss \
     --down_sampling_window 2 \
-> ./run_log/log_202506022128_win/weather/'TimeDART_pretrain_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
+> ./run_log/log_20250607153012_win/weather/'TimeDART_pretrain_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
 
 
 
@@ -1653,9 +1654,9 @@ echo "Weather $denoise_layers_num _ $pred_len"
         --patience 3 \
         --learning_rate 0.0004 \
         --pct_start 0.3 \
-    --down_sampling_layer 2 \
+    --use_init_loss $use_init_loss \
     --down_sampling_window 2 \
-> ./run_log/log_202506022128_win/weather/'TimeDART_finetune'$pred_len'_'$denoise_layers_num'_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
+> ./run_log/log_20250607153012_win/weather/'TimeDART_finetune'$pred_len'_'$denoise_layers_num'_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
 
 done
 
@@ -1723,9 +1724,9 @@ python -u run.py \
     --log_var_orth $log_var_orth \
     --log_var_smooth $log_var_smooth \
     --log_var_season_freq $log_var_season_freq \
-    --down_sampling_layer 2 \
+    --use_init_loss $use_init_loss \
     --down_sampling_window 2 \
-> ./run_log/log_202506022128_win/ETTh1/'TimeDART_pretrain_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
+> ./run_log/log_20250607153012_win/ETTh1/'TimeDART_pretrain_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
 
 for pred_len in   96 192 336 720; do
 echo "ETTh1 $denoise_layers_num _ $pred_len"
@@ -1772,9 +1773,9 @@ echo "ETTh1 $denoise_layers_num _ $pred_len"
         --log_var_orth $log_var_orth \
         --log_var_smooth $log_var_smooth \
         --log_var_season_freq $log_var_season_freq \
-        --down_sampling_layer 2 \
+        --use_init_loss $use_init_loss \
         --down_sampling_window 2 \
-> ./run_log/log_202506022128_win/ETTh1/'TimeDART_finetune'$pred_len'_'$denoise_layers_num'_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
+> ./run_log/log_20250607153012_win/ETTh1/'TimeDART_finetune'$pred_len'_'$denoise_layers_num'_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
 done
 
 
@@ -1827,9 +1828,9 @@ python -u run.py \
     --log_var_orth $log_var_orth \
     --log_var_smooth $log_var_smooth \
     --log_var_season_freq $log_var_season_freq \
-    --down_sampling_layer 2 \
+    --use_init_loss $use_init_loss \
     --down_sampling_window 2 \
-> ./run_log/log_202506022128_win/ETTh2/'TimeDART_pretrain_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
+> ./run_log/log_20250607153012_win/ETTh2/'TimeDART_pretrain_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
 
 
 
@@ -1878,9 +1879,9 @@ echo "ETTh2 $denoise_layers_num _ $pred_len"
         --log_var_season_freq $log_var_season_freq \
         --learning_rate 0.0001 \
         --pct_start 0.3 \
-        --down_sampling_layer 2 \
+        --use_init_loss $use_init_loss \
         --down_sampling_window 2 \
-> ./run_log/log_202506022128_win/ETTh2/'TimeDART_finetune'$pred_len'_'$denoise_layers_num'_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
+> ./run_log/log_20250607153012_win/ETTh2/'TimeDART_finetune'$pred_len'_'$denoise_layers_num'_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
 
 done
 
@@ -1931,9 +1932,9 @@ python -u run.py \
     --log_var_orth $log_var_orth \
     --log_var_smooth $log_var_smooth \
     --log_var_season_freq $log_var_season_freq \
-    --down_sampling_layer 2 \
+    --use_init_loss $use_init_loss \
     --down_sampling_window 2 \
-> ./run_log/log_202506022128_win/ETTm1/'TimeDART_pretrain_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
+> ./run_log/log_20250607153012_win/ETTm1/'TimeDART_pretrain_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
 
 for pred_len in 96 192 336 720; do
 echo "ETTm1 $denoise_layers_num _ $pred_len"
@@ -1980,9 +1981,9 @@ echo "ETTm1 $denoise_layers_num _ $pred_len"
         --patience 3 \
         --learning_rate 0.0001 \
         --pct_start 0.3 \
-       --down_sampling_layer 2 \
+       --use_init_loss $use_init_loss \
        --down_sampling_window 2 \
-> ./run_log/log_202506022128_win/ETTm1/'TimeDART_finetune'$pred_len'_'$denoise_layers_num'_'0.01.log 2>&1
+> ./run_log/log_20250607153012_win/ETTm1/'TimeDART_finetune'$pred_len'_'$denoise_layers_num'_'0.01.log 2>&1
 
 done
 
@@ -2035,9 +2036,9 @@ python -u run.py \
     --log_var_smooth $log_var_smooth \
     --log_var_season_freq $log_var_season_freq \
     --train_epochs 10 \
-    --down_sampling_layer 2 \
+    --use_init_loss $use_init_loss \
     --down_sampling_window 2 \
-> ./run_log/log_202506022128_win/ETTm2/'TimeDART_pretrain_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
+> ./run_log/log_20250607153012_win/ETTm2/'TimeDART_pretrain_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
 
 
 
@@ -2086,9 +2087,9 @@ echo "ETTm2 $denoise_layers_num _ $pred_len"
         --log_var_smooth $log_var_smooth \
         --log_var_season_freq $log_var_season_freq \
         --pct_start 0.2 \
-       --down_sampling_layer 2 \
+       --use_init_loss $use_init_loss \
        --down_sampling_window 2 \
-> ./run_log/log_202506022128_win/ETTm2/'TimeDART_finetune'$pred_len'_'$denoise_layers_num'_'0.01.log 2>&1
+> ./run_log/log_20250607153012_win/ETTm2/'TimeDART_finetune'$pred_len'_'$denoise_layers_num'_'0.01.log 2>&1
 
 done
 log_var_freq=0.2
@@ -2137,9 +2138,9 @@ python -u run.py \
     --learning_rate 0.001 \
     --batch_size 16 \
     --train_epochs 10 \
-    --down_sampling_layer 2 \
+    --use_init_loss $use_init_loss \
     --down_sampling_window 2 \
-> ./run_log/log_202506022128_win/weather/'TimeDART_pretrain_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
+> ./run_log/log_20250607153012_win/weather/'TimeDART_pretrain_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
 
 
 
@@ -2188,9 +2189,9 @@ echo "Weather $denoise_layers_num _ $pred_len"
         --patience 3 \
         --learning_rate 0.0004 \
         --pct_start 0.3 \
-    --down_sampling_layer 2 \
+    --use_init_loss $use_init_loss \
     --down_sampling_window 2 \
-> ./run_log/log_202506022128_win/weather/'TimeDART_finetune'$pred_len'_'$denoise_layers_num'_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
+> ./run_log/log_20250607153012_win/weather/'TimeDART_finetune'$pred_len'_'$denoise_layers_num'_f'$del_freq_loss'_'$log_var_freq'_o'$del_orth_loss'_'$log_var_orth'_s'$del_smoothness_loss'_'$log_var_smooth'_sea'$del_season_freq_loss'_'$log_var_season_freq'_r'$del_recon_loss'_'$log_var_recon'_'0.01.log 2>&1
 
 done
 
