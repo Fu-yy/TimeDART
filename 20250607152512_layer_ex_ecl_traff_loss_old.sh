@@ -69,21 +69,22 @@ fi
 
 use_init_loss=0
 #------------------------
+
 del_orth_loss=0
 del_season_freq_loss=0
 del_smoothness_loss=0
 del_freq_loss=0
 del_recon_loss=0
 
+
+
+for denoise_layers_num in 1;do
+
 log_var_freq=0.5
 log_var_orth=6.0
 log_var_smooth=1.0
 log_var_season_freq=4.0
 log_var_recon=0.1
-
-for denoise_layers_num in 1;do
-
-
 echo "Exchange $denoise_layers_num"
 
 python -u run.py \
@@ -183,11 +184,7 @@ done
 
 
 
-del_orth_loss=0
-del_season_freq_loss=0
-del_smoothness_loss=0
-del_freq_loss=0
-del_recon_loss=0
+
 
 log_var_freq=0.2
 log_var_orth=6.0
@@ -291,11 +288,7 @@ echo "ECL $denoise_layers_num _ $pred_len"
 done
 
 
-del_orth_loss=0
-del_season_freq_loss=0
-del_smoothness_loss=0
-del_freq_loss=0
-del_recon_loss=0
+
 
 log_var_freq=0.2
 log_var_orth=6.0
@@ -411,15 +404,15 @@ del_smoothness_loss=0
 del_freq_loss=0
 del_recon_loss=0
 
+
+
+for denoise_layers_num in 1;do
+
 log_var_freq=0.5
 log_var_orth=6.0
 log_var_smooth=1.0
 log_var_season_freq=4.0
 log_var_recon=0.1
-
-for denoise_layers_num in 1;do
-
-
 echo "Exchange $denoise_layers_num"
 
 python -u run.py \
@@ -519,11 +512,7 @@ done
 
 
 
-del_orth_loss=0
-del_season_freq_loss=0
-del_smoothness_loss=0
-del_freq_loss=0
-del_recon_loss=0
+
 
 log_var_freq=0.2
 log_var_orth=6.0
@@ -627,11 +616,7 @@ echo "ECL $denoise_layers_num _ $pred_len"
 done
 
 
-del_orth_loss=0
-del_season_freq_loss=0
-del_smoothness_loss=0
-del_freq_loss=0
-del_recon_loss=0
+
 
 log_var_freq=0.2
 log_var_orth=6.0
@@ -747,15 +732,15 @@ del_smoothness_loss=0
 del_freq_loss=0
 del_recon_loss=0
 
+
+
+for denoise_layers_num in 1;do
+
 log_var_freq=0.5
 log_var_orth=6.0
 log_var_smooth=1.0
 log_var_season_freq=4.0
 log_var_recon=0.1
-
-for denoise_layers_num in 1;do
-
-
 echo "Exchange $denoise_layers_num"
 
 python -u run.py \
@@ -855,11 +840,7 @@ done
 
 
 
-del_orth_loss=0
-del_season_freq_loss=0
-del_smoothness_loss=0
-del_freq_loss=0
-del_recon_loss=0
+
 
 log_var_freq=0.2
 log_var_orth=6.0
@@ -963,11 +944,7 @@ echo "ECL $denoise_layers_num _ $pred_len"
 done
 
 
-del_orth_loss=0
-del_season_freq_loss=0
-del_smoothness_loss=0
-del_freq_loss=0
-del_recon_loss=0
+
 
 log_var_freq=0.2
 log_var_orth=6.0
@@ -1083,14 +1060,14 @@ del_smoothness_loss=1
 del_freq_loss=0
 del_recon_loss=0
 
+
+
+for denoise_layers_num in 1;do
 log_var_freq=0.5
 log_var_orth=6.0
 log_var_smooth=1.0
 log_var_season_freq=4.0
 log_var_recon=0.1
-
-for denoise_layers_num in 1;do
-
 
 echo "Exchange $denoise_layers_num"
 
@@ -1191,11 +1168,7 @@ done
 
 
 
-del_orth_loss=0
-del_season_freq_loss=0
-del_smoothness_loss=0
-del_freq_loss=0
-del_recon_loss=0
+
 
 log_var_freq=0.2
 log_var_orth=6.0
@@ -1299,11 +1272,7 @@ echo "ECL $denoise_layers_num _ $pred_len"
 done
 
 
-del_orth_loss=0
-del_season_freq_loss=0
-del_smoothness_loss=0
-del_freq_loss=0
-del_recon_loss=0
+
 
 log_var_freq=0.2
 log_var_orth=6.0
@@ -1419,15 +1388,15 @@ del_smoothness_loss=0
 del_freq_loss=1
 del_recon_loss=0
 
+
+
+for denoise_layers_num in 1;do
+
 log_var_freq=0.5
 log_var_orth=6.0
 log_var_smooth=1.0
 log_var_season_freq=4.0
 log_var_recon=0.1
-
-for denoise_layers_num in 1;do
-
-
 echo "Exchange $denoise_layers_num"
 
 python -u run.py \
@@ -1527,11 +1496,7 @@ done
 
 
 
-del_orth_loss=0
-del_season_freq_loss=0
-del_smoothness_loss=0
-del_freq_loss=0
-del_recon_loss=0
+
 
 log_var_freq=0.2
 log_var_orth=6.0
@@ -1635,11 +1600,7 @@ echo "ECL $denoise_layers_num _ $pred_len"
 done
 
 
-del_orth_loss=0
-del_season_freq_loss=0
-del_smoothness_loss=0
-del_freq_loss=0
-del_recon_loss=0
+
 
 log_var_freq=0.2
 log_var_orth=6.0
@@ -1755,15 +1716,15 @@ del_smoothness_loss=0
 del_freq_loss=0
 del_recon_loss=1
 
+
+
+for denoise_layers_num in 1;do
+
 log_var_freq=0.5
 log_var_orth=6.0
 log_var_smooth=1.0
 log_var_season_freq=4.0
 log_var_recon=0.1
-
-for denoise_layers_num in 1;do
-
-
 echo "Exchange $denoise_layers_num"
 
 python -u run.py \
@@ -1863,11 +1824,7 @@ done
 
 
 
-del_orth_loss=0
-del_season_freq_loss=0
-del_smoothness_loss=0
-del_freq_loss=0
-del_recon_loss=0
+
 
 log_var_freq=0.2
 log_var_orth=6.0
@@ -1971,11 +1928,7 @@ echo "ECL $denoise_layers_num _ $pred_len"
 done
 
 
-del_orth_loss=0
-del_season_freq_loss=0
-del_smoothness_loss=0
-del_freq_loss=0
-del_recon_loss=0
+
 
 log_var_freq=0.2
 log_var_orth=6.0
