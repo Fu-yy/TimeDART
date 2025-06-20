@@ -25,14 +25,91 @@ from tensorboardX import SummaryWriter
 # from torch.utils.tensorboard import SummaryWriter
 import random
 from tqdm import tqdm
+from collections import defaultdict
+import pickle
 
 warnings.filterwarnings("ignore")
 
 
+class AdaptiveLossBalancer:
+    def __init__(self, base_weights, momentum=0.9):
+        """
+        base_weights: dict 基础权重配置
+        momentum: 滑动平均的动量因子
+        """
+        self.base_weights = base_weights
+        self.momentum = momentum
+        self.running_means = {k: None for k in base_weights.keys()}
+
+    def __call__(self, losses,device):
+        """
+        losses: dict {loss_name: tensor}
+        返回加权后的总损失
+        """
+        factor_hist = defaultdict(list)
+
+        total_loss = torch.zeros((), device=device)
+        adaptive_factors = {}
+        # 计算自适应因子
+        for name, loss in losses.items():
+            if self.running_means[name] is None:
+                self.running_means[name] = loss.detach()
+            else:
+                self.running_means[name] = (
+                        self.momentum * self.running_means[name] +
+                        (1 - self.momentum) * loss.detach()
+                )
+
+            # 相对大小因子 (0.5-2.0范围)
+            rel_factor = loss.detach() / (self.running_means[name] + 1e-8)
+            adaptive_factor = torch.clamp(rel_factor, 0.5, 2.0)
+            adaptive_factors[name] = adaptive_factor
+
+            # 应用基础权重和自适应因子
+            # 3) 加权累加（全程 tensor 运算）
+            weight = self.base_weights[name]
+
+            # 如果 base_weights 是 Python float，loss*adaptive_factor*weight 会自动转成 tensor
+            loss_weight_value = weight * adaptive_factor * loss
+            total_loss = total_loss + loss_weight_value
+            factor_hist[name].append(loss_weight_value.item())
+        return total_loss, adaptive_factors,factor_hist
 class Exp_TimeDART(Exp_Basic):
     def __init__(self, args):
         super(Exp_TimeDART, self).__init__(args)
         self.writer = SummaryWriter(f"./outputs/logs")
+        self.loss_balancer = AdaptiveLossBalancer(
+            # base_weights={
+            #     'diff': 1.0,
+            #     'freq': self.model.freq_weight,
+            #     'orth': self.model.orth_weight,
+            #     'smooth': self.model.smooth_weight,
+            #     'season_freq': self.model.season_freq_weight,
+            #     'recon': self.model.recon_weight,
+            #     'period': self.model.period_weight,
+            #     'reg': self.model.reg_weight
+            # },
+            base_weights={
+                'diff': 1.0,
+                'freq': 0.3,
+                'orth': 0.01,
+                'smooth': 0,
+                'season_freq': 0.05,
+                'recon': 0,
+            },
+            # base_weights={
+            #     'diff': 0.9,  # 保持主导，但稍下调
+            #     'freq': 0.6,  # 明显提高，强化全频约束
+            #     'orth': 0.03,  # 提高，使正交性生效
+            #     'smooth': 0.0,  # 若需平滑，可置小值；否则继续置0
+            #     'season_freq': 0.12,  # 增强季节成分学习
+            #     'recon': 0.0,  # 删除
+            #     'period': 0.03,  # 若保留，可小幅度调整；否则删除
+            #     'reg': 1e-4  # 启用模型参数正则
+            # },
+            momentum=0.95
+        )
+        self.loss_names = ['diff', 'freq', 'orth', 'smooth', 'season_freq', 'recon']
 
     def _build_model(self):
         model = self.model_dict[self.args.model].Model(self.args).float()
@@ -174,6 +251,20 @@ class Exp_TimeDART(Exp_Basic):
 
             self.model.init_adaptive_weights(simple_batch_x)
 
+
+
+
+        # -------------------
+
+
+
+        # loss_names = ['diff', 'freq', 'orth', 'smooth', 'season_freq', 'recon', 'period', 'reg','ps_loss']
+        # loss_names = ['diff','ps_loss']
+        resourcce_loss_dict_hist = defaultdict(list)
+        factor_item_hist = defaultdict(list)
+
+        # -------------------
+
         for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(
             train_loader
         ):
@@ -202,9 +293,8 @@ class Exp_TimeDART(Exp_Basic):
                 # diff_loss = self.model(batch_x)
 
                 diff_loss = model_criterion(pred_x, batch_x)
-                print("before:")
 
-                print("diff_loss="+str(diff_loss.item()),"freq_loss=" + str(freq_loss.item()),"orth_loss=" + str(orth_loss.item()),"smoothness="+str(smoothness.item()),"season_freq_loss=" + str(season_freq_loss.item()),"recon_loss="+str(recon_loss.item()))
+
 
                 # 自适应权重计算（不确定权重法）
                 # loss_freq = 1 / (2 * torch.exp(self.model.log_var_freq)) * freq_loss# + 0.5 * self.model.log_var_freq
@@ -226,6 +316,7 @@ class Exp_TimeDART(Exp_Basic):
                 loss_season_freq = 1 / (2 *
                     self.model.log_var_season_freq) * season_freq_loss + 0.5 * torch.log(self.model.log_var_season_freq)
                 loss_recon = 1 / (2 * self.model.log_var_recon) * recon_loss + 0.5 * torch.log(self.model.log_var_recon)
+
                 if self.args.del_orth_loss == 1:
                     loss_orth = torch.tensor(0.0)  # 618
                 if self.args.del_smoothness_loss == 1:
@@ -239,40 +330,36 @@ class Exp_TimeDART(Exp_Basic):
                 # loss_freq = 0.01 * freq_loss
                 # loss_orth = 0.1 * orth_loss
                 # loss_smooth = 0.1 * smoothness
-                print("after:")
-                print("diff_loss="+str(diff_loss.item()),"loss_freq=" + str(loss_freq.item()),"loss_orth=" + str(loss_orth.item()),"loss_smooth="+str(loss_smooth.item()),"loss_season_freq=" + str(loss_season_freq.item()),"loss_recon="+str(loss_recon.item()))
 
-                diff_loss = diff_loss + loss_freq  + loss_orth + loss_smooth +loss_season_freq+loss_recon
+                # resourcce_loss_dict = {  # 原始输出loss
+                #     'diff': diff_loss,
+                #     'freq': freq_loss,
+                #     'orth': orth_loss,
+                #     'smooth': smoothness,
+                #     'season_freq': season_freq_loss,
+                #     'recon': recon_loss,
+                # },
+                log_loss_dict = {  # 原始输出loss
+                    'diff': diff_loss,
+                    'freq': loss_freq,
+                    'orth': loss_orth,
+                    'smooth': loss_smooth,
+                    'season_freq': loss_season_freq,
+                    'recon': loss_recon,
+                },
+
+
+                total_loss, adaptive_factors, factor_hist_item = self.loss_balancer(log_loss_dict[0],
+                                                                               device=self.device)
+                for name in self.loss_names:
+                    resourcce_loss_dict_hist[name].append(log_loss_dict[0][name].item())
+                    # adaptive_factors[name] 也是对应的权重
+                    factor_item_hist[name].append(factor_hist_item[name])
+                diff_loss = total_loss
 
                 # -----
                 # 训练监控（前5个epoch打印详细信息）
-                if i < 5:
-                    # 打印自适应权重
-                    print(f"\nEpoch {i} Adaptive Weights:")
-                    print(f"  freq_weight: {loss_freq.item():.6f} (log_var={self.model.log_var_freq.item():.4f})")
-                    print(f"  orth_weight: {loss_orth.item():.6f} (log_var={self.model.log_var_orth.item():.4f})")
-                    print(f"  smooth_weight: {loss_smooth.item():.6f} (log_var={self.model.log_var_smooth.item():.4f})")
-                    print(
-                        f"  season_weight: {loss_season_freq.item():.6f} (log_var={self.model.log_var_season_freq.item():.4f})")
-                    print(f"  recon_weight: {loss_recon.item():.6f} (log_var={self.model.log_var_recon.item():.4f})")
 
-                    # 打印正则项贡献
-                    print("\nRegularization Terms:")
-                    print(f"  freq_reg: {0.5 * torch.log(self.model.log_var_freq).item():.4f}")
-                    print(f"  orth_reg: {0.5 * torch.log(self.model.log_var_orth).item():.4f}")
-                    print(f"  smooth_reg: {0.5 * torch.log(self.model.log_var_smooth).item():.4f}")
-                    print(f"  season_reg: {0.5 * torch.log(self.model.log_var_season_freq).item():.4f}")
-                    print(f"  recon_reg: {0.5 * torch.log(self.model.log_var_recon).item():.4f}")
-
-                    # 打印总损失组成
-                    print("\nTotal Loss Breakdown:")
-                    print(f"  total_loss: {diff_loss.item():.4f}")
-                    print(f"    freq_component: {loss_freq.item() / diff_loss.item():.2%}")
-                    print(f"    orth_component: {loss_orth.item() / diff_loss.item():.2%}")
-                    print(f"    smooth_component: {loss_smooth.item() / diff_loss.item():.2%}")
-                    print(f"    season_component: {loss_season_freq.item() / diff_loss.item():.2%}")
-                    print(f"    recon_component: {loss_recon.item() / diff_loss.item():.2%}")
-                # -----
 
             else:
                 pred_x, = self.model(batch_x,None,i)
@@ -282,6 +369,47 @@ class Exp_TimeDART(Exp_Basic):
             diff_loss.backward()
             model_optim.step()
             train_loss.append(diff_loss.item())
+
+        # ###############绘图
+
+        # 解决中文显示问题
+        plt.rcParams['font.sans-serif'] = ['SimHei']  # 使用黑体
+        plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
+
+        # 下采样函数：每隔step个点取一个点
+        def downsample(data, step=10):
+            return data[::step]
+
+        # 保存历史数据的函数
+        def save_hist(hist_dict, filename):
+            with open(filename, 'wb') as f:
+                pickle.dump(hist_dict, f)
+
+        # ---- 1. 各loss分量随step变化 ----
+        plt.figure(figsize=(20, 6))
+        for name in self.loss_names:
+            downsampled = downsample(resourcce_loss_dict_hist[name])
+            plt.plot(downsampled, label=name)
+        plt.title('各 Loss 分量随 Step 的变化（源loss）')
+        plt.xlabel('Training Step')
+        plt.ylabel('Loss Value')
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig('源loss.png')
+        save_hist(resourcce_loss_dict_hist, 'resourcce_loss_dict_hist.pkl')  # 保存原始数据
+
+        # ---- 2. 各adaptive factor随step变化 ----
+        plt.figure(figsize=(20, 6))
+        for name in self.loss_names:
+            downsampled = downsample(factor_item_hist[name])
+            plt.plot(downsampled, label=name)
+        plt.title('各 Adaptive Factor 随 Step 的变化（内部乘上权重之后的loss分量）')
+        plt.xlabel('Training Step')
+        plt.ylabel('Adaptive Factor')
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig('内部乘上权重之后的loss分量.png')
+        save_hist(factor_item_hist, 'factor_item_hist.pkl')  # 保存原始数据
 
         model_scheduler.step()
         train_loss = np.mean(train_loss)
@@ -353,6 +481,8 @@ class Exp_TimeDART(Exp_Basic):
             epochs=self.args.train_epochs,
             max_lr=self.args.learning_rate,
         )
+        resourcce_loss_dict_hist = defaultdict(list)
+        factor_item_hist = defaultdict(list)
 
         for epoch in range(self.args.train_epochs):
             iter_count = 0
@@ -414,41 +544,31 @@ class Exp_TimeDART(Exp_Basic):
                     loss_freq = torch.tensor(0.0)  # 2.3
                 if self.args.del_recon_loss == 1:
                     loss_recon = torch.tensor(0.0)
-                loss = loss + loss_freq + loss_orth + loss_smooth + loss_season_freq +loss_recon
+
+                log_loss_dict = {  # 原始输出loss
+                    'diff': loss,
+                    'freq': loss_freq,
+                    'orth': loss_orth,
+                    'smooth': loss_smooth,
+                    'season_freq': loss_season_freq,
+                    'recon': loss_recon,
+                },
+
+                total_loss, adaptive_factors, factor_hist_item = self.loss_balancer(log_loss_dict[0],
+                                                                                    device=self.device)
+                for name in self.loss_names:
+                    resourcce_loss_dict_hist[name].append(log_loss_dict[0][name].item())
+                    # adaptive_factors[name] 也是对应的权重
+                    factor_item_hist[name].append(factor_hist_item[name])
+                loss = total_loss
+                # loss = loss + loss_freq + loss_orth + loss_smooth + loss_season_freq +loss_recon
 
 
 
 
                 # -----
                 # 训练监控（前5个epoch打印详细信息）
-                if epoch < 5:
-                    # 打印自适应权重
-                    print(f"\nEpoch {epoch} Adaptive Weights:")
-                    print(f"  freq_weight: {loss_freq.item():.6f} (log_var={self.model.log_var_freq.item():.4f})")
-                    print(f"  orth_weight: {loss_orth.item():.6f} (log_var={self.model.log_var_orth.item():.4f})")
-                    print(f"  smooth_weight: {loss_smooth.item():.6f} (log_var={self.model.log_var_smooth.item():.4f})")
-                    print(
-                        f"  season_weight: {loss_season_freq.item():.6f} (log_var={self.model.log_var_season_freq.item():.4f})")
-                    print(f"  recon_weight: {loss_recon.item():.6f} (log_var={self.model.log_var_recon.item():.4f})")
 
-
-                    # 打印正则项贡献
-                    print("\nRegularization Terms:")
-                    print(f"  freq_reg: {0.5 * torch.log(self.model.log_var_freq).item():.4f}")
-                    print(f"  orth_reg: {0.5 * torch.log(self.model.log_var_orth).item():.4f}")
-                    print(f"  smooth_reg: {0.5 * torch.log(self.model.log_var_smooth).item():.4f}")
-                    print(f"  season_reg: {0.5 * torch.log(self.model.log_var_season_freq).item():.4f}")
-                    print(f"  recon_reg: {0.5 * torch.log(self.model.log_var_recon).item():.4f}")
-
-                    # 打印总损失组成
-                    print("\nTotal Loss Breakdown:")
-                    print(f"  total_loss: {loss.item():.4f}")
-                    print(f"    freq_component: {loss_freq.item() / loss.item():.2%}")
-                    print(f"    orth_component: {loss_orth.item() / loss.item():.2%}")
-                    print(f"    smooth_component: {loss_smooth.item() / loss.item():.2%}")
-                    print(f"    season_component: {loss_season_freq.item() / loss.item():.2%}")
-                    print(f"    recon_component: {loss_recon.item() / loss.item():.2%}")
-                # -----
 
 
 
@@ -502,6 +622,46 @@ class Exp_TimeDART(Exp_Basic):
                 break
             if self.args.lradj != "step":
                 adjust_learning_rate(model_optim, model_scheduler, epoch + 1, self.args)
+        # ###############绘图
+
+        # 解决中文显示问题
+        plt.rcParams['font.sans-serif'] = ['SimHei']  # 使用黑体
+        plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
+
+        # 下采样函数：每隔step个点取一个点
+        def downsample(data, step=10):
+            return data[::step]
+
+        # 保存历史数据的函数
+        def save_hist(hist_dict, filename):
+            with open(filename, 'wb') as f:
+                pickle.dump(hist_dict, f)
+
+        # ---- 1. 各loss分量随step变化 ----
+        plt.figure(figsize=(20, 6))
+        for name in self.loss_names:
+            downsampled = downsample(resourcce_loss_dict_hist[name])
+            plt.plot(downsampled, label=name)
+        plt.title('各 Loss 分量随 Step 的变化（源loss）')
+        plt.xlabel('Training Step')
+        plt.ylabel('Loss Value')
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig('train源loss.png')
+        save_hist(resourcce_loss_dict_hist, 'trainresourcce_loss_dict_hist.pkl')  # 保存原始数据
+
+        # ---- 2. 各adaptive factor随step变化 ----
+        plt.figure(figsize=(20, 6))
+        for name in self.loss_names:
+            downsampled = downsample(factor_item_hist[name])
+            plt.plot(downsampled, label=name)
+        plt.title('各 Adaptive Factor 随 Step 的变化（内部乘上权重之后的loss分量）')
+        plt.xlabel('Training Step')
+        plt.ylabel('Adaptive Factor')
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig('train内部乘上权重之后的loss分量.png')
+        save_hist(factor_item_hist, 'trainfactor_item_hist.pkl')  # 保存原始数据
 
         best_model_path = path + "/" + "checkpoint.pth"
         self.model.load_state_dict(torch.load(best_model_path, map_location="cuda:0"))

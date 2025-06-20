@@ -202,6 +202,38 @@ class FixedMultiScaleConv(nn.Module):
         return [conv(x) for conv in self.conv_layers]
 
 
+class LearnableMultiScaleConv(nn.Module):
+    """
+    多尺度可学习滤波器：初始化为均值滤波器，并在训练中可微调整。
+    同时提供正则化项，约束卷积核接近初始均值滤波。
+    """
+    def __init__(self, nvar, scales, init_kernel=None, reg_lambda=1e-3):
+        super().__init__()
+        self.reg_lambda = reg_lambda
+        self.scales = scales
+        self.conv_layers = nn.ModuleList([
+            nn.Conv1d(nvar, nvar, kernel_size=k,
+                      padding=(k - 1) // 2, groups=nvar, bias=False)
+            for k in scales
+        ])
+        # 初始化为均值滤波
+        for conv in self.conv_layers:
+            k = conv.kernel_size[0]
+            init = torch.ones_like(conv.weight) / k
+            conv.weight.data.copy_(init)
+
+    def forward(self, x):
+        return [conv(x) for conv in self.conv_layers]
+
+    def reg_loss(self):
+        # L2 约束，鼓励权重不偏离初始均值滤波
+        loss = 0.0
+        for conv, k in zip(self.conv_layers, self.scales):
+            target = torch.ones_like(conv.weight) / k
+            loss = loss + F.mse_loss(conv.weight, target)
+        return self.reg_lambda * loss
+
+
 class LightWeightGenerator(nn.Module):
     def __init__(self, nvar, num_scales):
         super().__init__()
@@ -341,6 +373,10 @@ class StopLearnableMultiScaleDecomp(nn.Module):
             smooth_loss = 0.6 * second_diff + 0.4 * first_diff
         # # 重构约束
         recon_loss = F.l1_loss(x, seasonal + fused_trend)
+
+
+
+
         return seasonal.permute(0, 2, 1), fused_trend.permute(0, 2, 1), trend_freq_loss,orth_loss,smooth_loss,season_freq_loss,recon_loss
 def plot_tensors(tensor_list,file_name,index):
     project_path = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
@@ -649,13 +685,7 @@ class Model(nn.Module):
             input_dim=self.d_model,
             d_model=self.d_model
         )
-        # 在 Model 类中替换 ConditionalEncoding
-        # self.conditional_encoding_att = SeqAttention(
-        #     target_dim=self.d_model,
-        #     num_heads=self.num_heads,
-        #     embed_dim=self.d_model,
-        #     dropout=self.dropout,
-        # )
+
         # Decoder
         if self.task_name == "pretrain":
             self.denoising_patch_decoder = DenoisingPatchDecoder(
@@ -689,12 +719,7 @@ class Model(nn.Module):
 
 
         elif self.task_name == "finetune":
-            # self.head = FlattenHead(
-            #     seq_len=self.seq_len,
-            #     d_model=configs.d_model,
-            #     pred_len=configs.pred_len,
-            #     dropout=configs.head_dropout,
-            # )
+
 
             self.head = nn.ModuleList(
                 [FlattenHead(
@@ -726,26 +751,7 @@ class Model(nn.Module):
                 for i in range(configs.down_sampling_layers + 1)
             ])
 
-        # 自适应可学习权重参数
-        # 自适应损失权重参数
 
-        # self.log_var_freq = nn.Parameter(torch.log(torch.tensor(self.configs.log_var_freq)), requires_grad=True)
-        # self.log_var_orth = nn.Parameter(torch.log(torch.tensor(self.configs.log_var_orth)), requires_grad=True)
-        # self.log_var_smooth = nn.Parameter(torch.log(torch.tensor(self.configs.log_var_smooth)), requires_grad=True)
-        # self.log_var_season_freq = nn.Parameter(torch.log(torch.tensor(self.configs.log_var_season_freq)),
-        #                                         requires_grad=True)
-        # self.log_var_recon = nn.Parameter(torch.log(torch.tensor(self.configs.log_var_recon)), requires_grad=True)
-
-
-        # self.log_var_freq = nn.Parameter(torch.log(torch.tensor(1.0)))  # 频率损失初始权重 ≈0.5
-        # self.log_var_orth = nn.Parameter(torch.log(torch.tensor(300.0)))  # 正交损失初始权重 ≈0.0017
-        # self.log_var_smooth = nn.Parameter(torch.log(torch.tensor(0.001)))  # 平滑损失初始权重 ≈500
-        # self.log_var_season_freq = nn.Parameter(torch.log(torch.tensor(5.0)))  # 季节频率初始权重 ≈0.1
-
-        # self.log_var_freq = torch.tensor(self.configs.log_var_freq)
-        # self.log_var_orth = torch.tensor(self.configs.log_var_orth)
-        # self.log_var_smooth = torch.tensor(self.configs.log_var_smooth)
-        # self.log_var_season_freq = torch.tensor(self.configs.log_var_season_freq)
         if self.configs.use_init_loss == 1:
             self.log_var_freq = nn.Parameter(torch.zeros(1), requires_grad=True)
             self.log_var_orth = nn.Parameter(torch.zeros(1), requires_grad=True)
@@ -760,20 +766,12 @@ class Model(nn.Module):
             self.log_var_season_freq = nn.Parameter(torch.tensor(self.configs.log_var_season_freq), requires_grad=True)
             self.log_var_recon = nn.Parameter(torch.tensor(self.configs.log_var_recon), requires_grad=True)
 
-        # self.log_var_freq = nn.Parameter(torch.log(torch.tensor(0.1)))
-        # self.log_var_orth = nn.Parameter(torch.log(torch.tensor(0.1)))
-        # self.log_var_smooth = nn.Parameter(torch.log(torch.tensor(0.1)))
-        # self.log_var_season_freq = nn.Parameter(torch.log(torch.tensor(0.1)))
-        # self.log_var_recon = nn.Parameter(torch.log(torch.tensor(0.1)))
-
 
         self.decomp_multi = series_decomp(95)
         self.decomp_multi_learnable = StopLearnableMultiScaleDecomp(self.configs.c_out,max_lag=63,num_scales=4,peak_threshold=0.3,distance=10)
         # self.decomp_multi_learnable_second = StopLearnableMultiScaleDecomp(self.patch_len,num_scales=4)
         self.decomp_multi_learnable_third = StopLearnableMultiScaleDecomp(self.d_model, max_lag=31,num_scales=4,peak_threshold=0.1,distance=3)
-        # self.decomp_multi_learnable = LearnableMultiScaleDecomp(self.configs.c_out)
-        # self.decomp_multi_learnable_second = LearnableMultiScaleDecomp(self.patch_len,scales=[5, 13, 25])
-        # self.decomp_multi_learnable_third = LearnableMultiScaleDecomp(self.d_model,scales=[5, 13, 25])
+
         self.denoise_layers_num = configs.denoise_layers_num
         self.denoise_layers = nn.ModuleList([
             DenoisingPatchDecoder(
@@ -805,11 +803,7 @@ class Model(nn.Module):
             self.log_var_smooth.data = smooth_loss + 1e-8
             self.log_var_season_freq.data = season_freq_loss + 1e-8
             self.log_var_recon.data = recon_loss + 1e-8
-            # self.log_var_freq.data = torch.log(freq_loss + 1e-8)
-            # self.log_var_orth.data = torch.log(orth_loss + 1e-8)
-            # self.log_var_smooth.data = torch.log(smooth_loss + 1e-8)
-            # self.log_var_season_freq.data = torch.log(season_freq_loss + 1e-8)
-            # self.log_var_recon.data = torch.log(recon_loss + 1e-8)
+
 
     def pretrain(self, x,x_mask,i=0):
 
@@ -832,9 +826,9 @@ class Model(nn.Module):
         x = x / stdevs  # [batch_size, input_len, num_features]
 
         # 分解  1
-        x, trend,freq_loss,orth_loss,smoothness,season_freq_loss,recon_loss = self.decomp_multi_learnable(x)
-        # x, trend = self.decomp_multi(x)
-
+        # x, trend,freq_loss,orth_loss,smoothness,season_freq_loss,recon_loss = self.decomp_multi_learnable(x)
+        x, trend = self.decomp_multi(x)
+        freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss=torch.tensor(0.0),torch.tensor(0.0),torch.tensor(0.0),torch.tensor(0.0),torch.tensor(0.0),
         # x, trend = x,x
         # Channel Independence
         x = self.channel_independence[0](x)  # [batch_size * num_features, input_len, 1]
@@ -911,16 +905,8 @@ class Model(nn.Module):
                 is_mask=True,
             )  # [batch_size * num_features, seq_len, d_model]
 
-            # noise end --------------------------
-            # 分解  4
-            # _, default_trend2 = self.decomp_multi_learnable_third(noise_x_embedding)
-            # noise_x_embedding = noise_x_embedding-default_trend2
 
-
-            # 分解  5
-            # noise_x_embedding, _ = noise_x_embedding,noise_x_embedding
-            x_out, x_out_trend,freq_loss_inner,orth_loss_inner,smoothness_inner ,season_freq_loss_inner,recon_loss_inner= self.decomp_multi_learnable_third(x_out)
-            # x_out, x_out_trend = self.decomp_multi(x_out)
+            x_out, x_out_trend = self.decomp_multi(x_out)
 
             # x_out, x_out_trend = x_out,x_out
 
@@ -952,6 +938,7 @@ class Model(nn.Module):
             )  # [batch_size, num_features, seq_len, d_model]
             denoise_out = self.projection[0](denoise_out)  # [batch_size, input_len, num_features]
             x = denoise_out
+            freq_loss_inner, orth_loss_inner, smoothness_inner, season_freq_loss_inner, recon_loss_inner=torch.tensor(0.0),torch.tensor(0.0),torch.tensor(0.0),torch.tensor(0.0),torch.tensor(0.0),
             freq_loss_inner_list.append(freq_loss_inner)
             orth_loss_inner_list.append(orth_loss_inner)
             smoothness_inner_list.append(smoothness_inner)
@@ -963,12 +950,6 @@ class Model(nn.Module):
             res_pred.append(predict_x)
         res_pred = torch.stack(res_pred,dim=-1).mean(dim=-1)
         predict_x = res_pred + self.regression[0](trend.permute(0,2,1)).permute(0,2,1).contiguous()
-        # if i % 20 == 0:
-        #     no_trend = [default_trend1,default_trend2,x_patch,noise_x_embedding]
-        #     plot_tensors(no_trend,'notrend',i)
-        #     trend_list = [default_trend1,default_trend2,x_patch,noise_x_embedding,trend]
-        #     plot_tensors(trend_list,'withtrend',i)
-
 
         # Instance Denormalization
         predict_x = predict_x * (stdevs[:, 0, :].unsqueeze(1)).repeat(
@@ -1000,30 +981,14 @@ class Model(nn.Module):
             torch.var(x, dim=1, keepdim=True, unbiased=False) + 1e-5
         ).detach()
         x = x / stdevs
-        # x, trend = self.decomp_multi(x)
-        x, trend,freq_loss,orth_loss,smoothness,season_freq_loss,recon_loss = self.decomp_multi_learnable(x)
+        x, trend = self.decomp_multi(x)
+        # x, trend,freq_loss,orth_loss,smoothness,season_freq_loss,recon_loss = self.decomp_multi_learnable(x)
         # x, trend = x,x
         x = self.channel_independence[0](x)  # [batch_size * num_features, input_len, 1]
         x = self.patch(x)  # [batch_size * num_features, seq_len, patch_len]
 
         # x = torch.fft.fft(x,dim=-2).imag
         x = self.enc_embedding(x)  # [batch_size * num_features, seq_len, d_model]
-
-
-        # --------------------------- 添加条件 begin
-        # 获取条件编码
-        # cond_encoded = self.conditional_encoding(x)  # [batch_size, 1, d_model]
-        # # 扩展条件编码以匹配批次和特征维度
-        # cond_encoded = cond_encoded.repeat_interleave(x.size(0) // cond_encoded.size(0),
-        #                                               dim=0)  # [batch_size * num_features, 1, d_model]
-        # cond_encoded = cond_encoded.expand(-1, x.size(1), -1)  # [batch_size * num_features, seq_len, d_model]
-        #
-        # # 将条件编码添加到嵌入中
-        # x = x + cond_encoded  # 结合条件编码
-
-        # --------------------------- 添加条件 end
-
-
 
 
         x = self.positional_encoding(x)  # [batch_size * num_features, seq_len, d_model]
@@ -1047,7 +1012,7 @@ class Model(nn.Module):
         x = x * (stdevs[:, 0, :].unsqueeze(1)).repeat(1, self.pred_len, 1)
         x = x + (means[:, 0, :].unsqueeze(1)).repeat(1, self.pred_len, 1)
 
-
+        freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss=torch.tensor(0.0),torch.tensor(0.0),torch.tensor(0.0),torch.tensor(0.0),torch.tensor(0.0),
         return x,freq_loss,orth_loss,smoothness,season_freq_loss,recon_loss
         # return x,0,0,0
 
