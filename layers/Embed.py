@@ -258,26 +258,26 @@ class PatchEmbedding(nn.Module):
         return x
 
 
-# class TokenEmbedding(nn.Module):
-#     def __init__(self, in_channels, d_model):
-#         super(TokenEmbedding, self).__init__()
-#         self.token_embedding = nn.Conv1d(
-#             in_channels=in_channels,
-#             out_channels=d_model,
-#             kernel_size=3,
-#             padding=1,
-#             padding_mode="circular",
-#             bias=False,
-#         )
-#         for m in self.modules():
-#             if isinstance(m, nn.Conv1d):
-#                 nn.init.kaiming_normal_(
-#                     m.weight, mode="fan_in", nonlinearity="leaky_relu"
-#                 )
-#
-#     def forward(self, x):
-#         x = self.token_embedding(x.transpose(1, 2)).transpose(1, 2)
-#         return x
+class TokenEmbedding_TimeDART(nn.Module):
+    def __init__(self, in_channels, d_model):
+        super(TokenEmbedding_TimeDART, self).__init__()
+        self.token_embedding = nn.Conv1d(
+            in_channels=in_channels,
+            out_channels=d_model,
+            kernel_size=3,
+            padding=1,
+            padding_mode="circular",
+            bias=False,
+        )
+        for m in self.modules():
+            if isinstance(m, nn.Conv1d):
+                nn.init.kaiming_normal_(
+                    m.weight, mode="fan_in", nonlinearity="leaky_relu"
+                )
+
+    def forward(self, x):
+        x = self.token_embedding(x.transpose(1, 2)).transpose(1, 2)
+        return x
 
 
 class PositionalEncoding(nn.Module):

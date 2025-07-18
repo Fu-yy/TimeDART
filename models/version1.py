@@ -6,7 +6,7 @@ from scipy.signal import find_peaks
 
 from layers.Autoformer_EncDec import moving_avg, series_decomp
 from layers.Transformer_EncDec import Decoder, DecoderLayer, Encoder, EncoderLayer
-from layers.SelfAttention_Family import DSAttention, AttentionLayer, FullAttention
+# from layers.SelfAttention_Family import DSAttention, AttentionLayer, FullAttention
 from layers.TimeDART_EncDec import (
     ChannelIndependence,
     AddSosTokenAndDropLast,
@@ -584,7 +584,7 @@ class Model(nn.Module):
         self.device = configs.device
         self.task_name = configs.task_name
         self.pred_len = configs.pred_len
-        self.inverse_embedding = nn.Linear(self.input_len, self.input_len)
+
         self.channel_independence = nn.ModuleList(
             [ChannelIndependence(
                 input_len=self.input_len // (configs.down_sampling_window ** i),
@@ -830,13 +830,10 @@ class Model(nn.Module):
             torch.var(x, dim=1, keepdim=True, unbiased=False) + 1e-5
         ).detach()  # [batch_size, 1, num_features]
         x = x / stdevs  # [batch_size, input_len, num_features]
-        x = self.inverse_embedding(x.permute(0,2,1)).permute(0,2,1)
+
         # 分解  1
-        if self.configs.use_new_decomp == 1:
-            x, trend,freq_loss,orth_loss,smoothness,season_freq_loss,recon_loss = self.decomp_multi_learnable(x)
-        else:
-            x, trend = self.decomp_multi(x)
-            freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss = torch.tensor(0.0), torch.tensor(0.0), torch.tensor(0.0), torch.tensor(0.0),torch.tensor(0.0)
+        x, trend,freq_loss,orth_loss,smoothness,season_freq_loss,recon_loss = self.decomp_multi_learnable(x)
+        # x, trend = self.decomp_multi(x)
 
         # x, trend = x,x
         # Channel Independence
@@ -897,14 +894,11 @@ class Model(nn.Module):
                 device=self.device,
                 dtype=torch.long
             )
-            if self.configs.use_defire_noise:
-                noise_x_patch, _ = self.diffusion.noise_with_t(x_patch, t)  # 使用指定t的噪声生成
-            else:
-
-                noise_x_patch, _, _ = self.diffusion(
-                    x_patch
-                )  # [batch_size * num_features, seq_len, patch_len]
+            # noise_x_patch, _, _ = self.diffusion(
+            #     x_patch
+            # )  # [batch_size * num_features, seq_len, patch_len]
             # 添加分层退火噪声
+            noise_x_patch, _ = self.diffusion.noise_with_t(x_patch, t)  # 使用指定t的噪声生成
 
             noise_x_embedding = self.enc_embedding(
                 noise_x_patch
@@ -925,23 +919,15 @@ class Model(nn.Module):
 
             # 分解  5
             # noise_x_embedding, _ = noise_x_embedding,noise_x_embedding
-            if self.configs.use_new_decomp == 1:
-
-                x_out, x_out_trend,freq_loss_inner,orth_loss_inner,smoothness_inner ,season_freq_loss_inner,recon_loss_inner= self.decomp_multi_learnable_third(x_out)
-            else:
-                x_out, x_out_trend = self.decomp_multi(x_out)
-                freq_loss_inner, orth_loss_inner, smoothness_inner, season_freq_loss_inner, recon_loss_inner =  torch.tensor(0.0), torch.tensor(0.0), torch.tensor(0.0), torch.tensor(0.0),torch.tensor(0.0)
+            x_out, x_out_trend,freq_loss_inner,orth_loss_inner,smoothness_inner ,season_freq_loss_inner,recon_loss_inner= self.decomp_multi_learnable_third(x_out)
+            # x_out, x_out_trend = self.decomp_multi(x_out)
 
             # x_out, x_out_trend = x_out,x_out
 
             # --------------------------- 添加条件 begin
             # 获取条件编码
             # cond_encoded = self.conditional_encoding_att(x_out_trend)  # [batch_size, 1, d_model]
-            if self.configs.use_trend_layer == 1:
-
-                cond_encoded = self.conditional_encoding(x_out_trend)  # [batch_size, 1, d_model]
-            else:
-                cond_encoded = x_out_trend
+            cond_encoded = self.conditional_encoding(x_out_trend)  # [batch_size, 1, d_model]
             # 扩展条件编码以匹配批次和特征维度
             # cond_encoded = cond_encoded.repeat_interleave(x_out_trend.size(0) // cond_encoded.size(0),
             #                                               dim=0)  # [batch_size * num_features, 1, d_model]
@@ -950,16 +936,15 @@ class Model(nn.Module):
             # 将条件编码添加到嵌入中
 
             # --------------------------- 添加条件 end
-            if self.configs.use_denoise == 1:
-                # For Denoising Patch Decoder
-                denoise_out = layer(
-                    Noise_x=denoise_input,
-                    X=x_out,
-                    cond=cond_encoded
-                )  # [batch_size * num_features, seq_len, d_model]
 
-            else:
-                denoise_out = denoise_input
+
+            # For Denoising Patch Decoder
+            denoise_out = layer(
+                Noise_x=denoise_input,
+                X=x_out,
+                cond=cond_encoded
+            )  # [batch_size * num_features, seq_len, d_model]
+
             # default_trend2_reg = self.trend2_regression(default_trend2.permute(0,2,1)).permute(0,2,1)
             # denoise_out = denoise_out + default_trend2_reg
             denoise_out = denoise_out.reshape(
@@ -1016,14 +1001,7 @@ class Model(nn.Module):
         ).detach()
         x = x / stdevs
         # x, trend = self.decomp_multi(x)
-        x = self.inverse_embedding(x.permute(0,2,1)).permute(0,2,1)
-
-        if self.configs.use_new_decomp == 1:
-            x, trend,freq_loss,orth_loss,smoothness,season_freq_loss,recon_loss = self.decomp_multi_learnable(x)
-        else:
-            x, trend = self.decomp_multi(x)
-            freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss = torch.tensor(0.0), torch.tensor(0.0), torch.tensor(0.0), torch.tensor(0.0),torch.tensor(0.0)
-
+        x, trend,freq_loss,orth_loss,smoothness,season_freq_loss,recon_loss = self.decomp_multi_learnable(x)
         # x, trend = x,x
         x = self.channel_independence[0](x)  # [batch_size * num_features, input_len, 1]
         x = self.patch(x)  # [batch_size * num_features, seq_len, patch_len]

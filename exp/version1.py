@@ -89,22 +89,22 @@ class Exp_TimeDART(Exp_Basic):
             #     'period': self.model.period_weight,
             #     'reg': self.model.reg_weight
             # },
-            # base_weights={
-            #     'diff': 1.0,
-            #     'freq': 0.3,
-            #     'orth': 0.01,
-            #     'smooth': 0,
-            #     'season_freq': 0.05,
-            #     'recon': 0,
-            # },
             base_weights={
                 'diff': 1.0,
-                'freq': self.args.log_var_freq,
-                'orth':self.args.log_var_orth,
-                'smooth': self.args.log_var_smooth,
-                'season_freq': self.args.log_var_season_freq,
-                'recon': self.args.log_var_recon,
+                'freq': 0.3,
+                'orth': 0.01,
+                'smooth': 0,
+                'season_freq': 0.05,
+                'recon': 0,
             },
+            # base_weights={
+            #     'diff': 1.0,
+            #     'freq': self.args.log_var_freq,
+            #     'orth':self.args.log_var_orth,
+            #     'smooth': self.args.log_var_smooth,
+            #     'season_freq': self.args.log_var_season_freq,
+            #     'recon': self.args.log_var_recon,
+            # },
             # base_weights={
             #     'diff': 0.9,  # 保持主导，但稍下调
             #     'freq': 0.6,  # 明显提高，强化全频约束
@@ -394,31 +394,31 @@ class Exp_TimeDART(Exp_Basic):
             with open(filename, 'wb') as f:
                 pickle.dump(hist_dict, f)
 
-        # # ---- 1. 各loss分量随step变化 ----
-        # plt.figure(figsize=(20, 6))
-        # for name in self.loss_names:
-        #     downsampled = downsample(resourcce_loss_dict_hist[name])
-        #     plt.plot(downsampled, label=name)
-        # plt.title('各 Loss 分量随 Step 的变化（源loss）')
-        # plt.xlabel('Training Step')
-        # plt.ylabel('Loss Value')
-        # plt.legend()
-        # plt.tight_layout()
-        # plt.savefig(str(self.args.data) + str(self.args.task_name) + str(self.args.pred_len)+'源loss.png')
-        # save_hist(resourcce_loss_dict_hist, str(self.args.data) + str(self.args.task_name) + str(self.args.pred_len)+'resourcce_loss_dict_hist.pkl')  # 保存原始数据
-        #
-        # # ---- 2. 各adaptive factor随step变化 ----
-        # plt.figure(figsize=(20, 6))
-        # for name in self.loss_names:
-        #     downsampled = downsample(factor_item_hist[name])
-        #     plt.plot(downsampled, label=name)
-        # plt.title('各 Adaptive Factor 随 Step 的变化（内部乘上权重之后的loss分量）')
-        # plt.xlabel('Training Step')
-        # plt.ylabel('Adaptive Factor')
-        # plt.legend()
-        # plt.tight_layout()
-        # plt.savefig(str(self.args.data) + str(self.args.task_name) + str(self.args.pred_len)+'内部乘上权重之后的loss分量.png')
-        # save_hist(factor_item_hist, str(self.args.data) + str(self.args.task_name) + str(self.args.pred_len)+'factor_item_hist.pkl')  # 保存原始数据
+        # ---- 1. 各loss分量随step变化 ----
+        plt.figure(figsize=(20, 6))
+        for name in self.loss_names:
+            downsampled = downsample(resourcce_loss_dict_hist[name])
+            plt.plot(downsampled, label=name)
+        plt.title('各 Loss 分量随 Step 的变化（源loss）')
+        plt.xlabel('Training Step')
+        plt.ylabel('Loss Value')
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(str(self.args.data) + str(self.args.task_name) + str(self.args.pred_len)+'源loss.png')
+        save_hist(resourcce_loss_dict_hist, str(self.args.data) + str(self.args.task_name) + str(self.args.pred_len)+'resourcce_loss_dict_hist.pkl')  # 保存原始数据
+
+        # ---- 2. 各adaptive factor随step变化 ----
+        plt.figure(figsize=(20, 6))
+        for name in self.loss_names:
+            downsampled = downsample(factor_item_hist[name])
+            plt.plot(downsampled, label=name)
+        plt.title('各 Adaptive Factor 随 Step 的变化（内部乘上权重之后的loss分量）')
+        plt.xlabel('Training Step')
+        plt.ylabel('Adaptive Factor')
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(str(self.args.data) + str(self.args.task_name) + str(self.args.pred_len)+'内部乘上权重之后的loss分量.png')
+        save_hist(factor_item_hist, str(self.args.data) + str(self.args.task_name) + str(self.args.pred_len)+'factor_item_hist.pkl')  # 保存原始数据
 
         model_scheduler.step()
         train_loss = np.mean(train_loss)
@@ -646,34 +646,34 @@ class Exp_TimeDART(Exp_Basic):
             with open(filename, 'wb') as f:
                 pickle.dump(hist_dict, f)
 
-        # # ---- 1. 各loss分量随step变化 ----
-        # plt.figure(figsize=(20, 6))
-        # for name in self.loss_names:
-        #     downsampled = downsample(resourcce_loss_dict_hist[name])
-        #     plt.plot(downsampled, label=name)
-        # plt.title('各 Loss 分量随 Step 的变化（源loss）')
-        # plt.xlabel('Training Step')
-        # plt.ylabel('Loss Value')
-        # plt.legend()
-        # plt.tight_layout()
-        # plt.savefig(str(self.args.data) + str(self.args.task_name) + str(self.args.pred_len)+'train源loss.png')
-        # save_hist(resourcce_loss_dict_hist, str(self.args.data) + str(self.args.task_name) + str(self.args.pred_len)+'trainresourcce_loss_dict_hist.pkl')  # 保存原始数据
-        #
-        # # ---- 2. 各adaptive factor随step变化 ----
-        # plt.figure(figsize=(20, 6))
-        # for name in self.loss_names:
-        #     downsampled = downsample(factor_item_hist[name])
-        #     plt.plot(downsampled, label=name)
-        # plt.title('各 Adaptive Factor 随 Step 的变化（内部乘上权重之后的loss分量）')
-        # plt.xlabel('Training Step')
-        # plt.ylabel('Adaptive Factor')
-        # plt.legend()
-        # plt.tight_layout()
-        # plt.savefig(str(self.args.data) + str(self.args.task_name) + str(self.args.pred_len)+'train内部乘上权重之后的loss分量.png')
-        # save_hist(factor_item_hist, str(self.args.data) + str(self.args.task_name) + str(self.args.pred_len)+'trainfactor_item_hist.pkl')  # 保存原始数据
+        # ---- 1. 各loss分量随step变化 ----
+        plt.figure(figsize=(20, 6))
+        for name in self.loss_names:
+            downsampled = downsample(resourcce_loss_dict_hist[name])
+            plt.plot(downsampled, label=name)
+        plt.title('各 Loss 分量随 Step 的变化（源loss）')
+        plt.xlabel('Training Step')
+        plt.ylabel('Loss Value')
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(str(self.args.data) + str(self.args.task_name) + str(self.args.pred_len)+'train源loss.png')
+        save_hist(resourcce_loss_dict_hist, str(self.args.data) + str(self.args.task_name) + str(self.args.pred_len)+'trainresourcce_loss_dict_hist.pkl')  # 保存原始数据
+
+        # ---- 2. 各adaptive factor随step变化 ----
+        plt.figure(figsize=(20, 6))
+        for name in self.loss_names:
+            downsampled = downsample(factor_item_hist[name])
+            plt.plot(downsampled, label=name)
+        plt.title('各 Adaptive Factor 随 Step 的变化（内部乘上权重之后的loss分量）')
+        plt.xlabel('Training Step')
+        plt.ylabel('Adaptive Factor')
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(str(self.args.data) + str(self.args.task_name) + str(self.args.pred_len)+'train内部乘上权重之后的loss分量.png')
+        save_hist(factor_item_hist, str(self.args.data) + str(self.args.task_name) + str(self.args.pred_len)+'trainfactor_item_hist.pkl')  # 保存原始数据
 
         best_model_path = path + "/" + "checkpoint.pth"
-        self.model.load_state_dict(torch.load(best_model_path, map_location="cuda:0"))
+        self.model.load_state_dict(torch.load(best_model_path, map_location="cuda:1"))
 
         self.lr = model_scheduler.get_last_lr()[0]
 
