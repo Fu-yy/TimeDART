@@ -830,7 +830,7 @@ class Model(nn.Module):
             torch.var(x, dim=1, keepdim=True, unbiased=False) + 1e-5
         ).detach()  # [batch_size, 1, num_features]
         x = x / stdevs  # [batch_size, input_len, num_features]
-        x = self.inverse_embedding(x.permute(0,2,1)).permute(0,2,1)
+        # x = self.inverse_embedding(x.permute(0,2,1)).permute(0,2,1)
         # 分解  1
         if self.configs.use_new_decomp == 1:
             x, trend,freq_loss,orth_loss,smoothness,season_freq_loss,recon_loss = self.decomp_multi_learnable(x)
@@ -1016,7 +1016,7 @@ class Model(nn.Module):
         ).detach()
         x = x / stdevs
         # x, trend = self.decomp_multi(x)
-        x = self.inverse_embedding(x.permute(0,2,1)).permute(0,2,1)
+        # x = self.inverse_embedding(x.permute(0,2,1)).permute(0,2,1)
 
         if self.configs.use_new_decomp == 1:
             x, trend,freq_loss,orth_loss,smoothness,season_freq_loss,recon_loss = self.decomp_multi_learnable(x)
