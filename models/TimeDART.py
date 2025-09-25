@@ -1,22 +1,8 @@
-import torch
-import torch.nn as nn
-from einops import rearrange, repeat
-import pandas as pd
 from scipy.signal import find_peaks
+import math
 
 from layers.Autoformer_EncDec import moving_avg, series_decomp
-from layers.Transformer_EncDec import Decoder, DecoderLayer, Encoder, EncoderLayer
-# from layers.SelfAttention_Family import DSAttention, AttentionLayer, FullAttention
-from layers.TimeDART_EncDec import (
-    ChannelIndependence,
-    AddSosTokenAndDropLast,
-    CausalTransformer,
-    Diffusion,
-    DenoisingPatchDecoder,
-)
-from layers.Embed import Patch, PatchEmbedding, PositionalEncoding
-from utils.augmentations import masked_data
-import torch.nn.functional as F
+
 import torch
 import os
 import torch.nn as nn
@@ -24,7 +10,260 @@ import torch.nn as nn
 import matplotlib.pyplot as plt
 # TimeDART_version2
 # 只保留15分解，用新的分解策略
+class ChannelIndependence(nn.Module):
+    def __init__(
+        self,
+        input_len: int,
+    ):
+        super(ChannelIndependence, self).__init__()
+        self.input_len = input_len
 
+    def forward(self, x):
+        """
+        :param x: [batch_size, input_len, num_features]
+        :return: [batch_size * num_features, input_len, 1]
+        """
+        x = x.permute(0, 2, 1)
+        x = x.reshape(-1, self.input_len, 1)
+        return x
+class AbsolutePositionEncoding(nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        max_len: int = 5000,
+    ):
+        super(AbsolutePositionEncoding, self).__init__()
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(
+            torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model)
+        )
+        pe = torch.zeros(max_len, d_model)
+        pe.requires_grad = False
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        self.register_buffer("pe", pe.unsqueeze(0))
+
+    def forward(self, x):
+        """
+        :param x: [batch_size * num_features, seq_len, d_model]
+        :return: [batch_size * num_features, seq_len, d_model]
+        """
+        return self.pe[:, : x.size(1)]
+
+
+
+class AddSosTokenAndDropLast(nn.Module):
+    def __init__(self, sos_token: torch.Tensor):
+        super(AddSosTokenAndDropLast, self).__init__()
+        assert sos_token.dim() == 3
+        self.sos_token = sos_token
+
+    def forward(self, x):
+        """
+        :param x: [batch_size * num_features, seq_len, d_model]
+        :return: [batch_size * num_features, seq_len, d_model]
+        """
+        sos_token_expanded = self.sos_token.expand(
+            x.size(0), -1, -1
+        )  # [batch_size * num_features, 1, d_model]
+        x = torch.cat(
+            [sos_token_expanded, x], dim=1
+        )  # [batch_size * num_features, seq_len + 1, d_model]
+        x = x[:, :-1, :]  # [batch_size * num_features, seq_len, d_model]
+        return x
+
+class Patch(nn.Module):
+    def __init__(
+        self,
+        patch_len: int,
+        stride: int,
+    ):
+        super(Patch, self).__init__()
+        self.patch_len = patch_len
+        self.stride = stride
+
+    def forward(self, x):
+        """
+        :param x: [batch_size * num_features, input_len, 1]
+        :return: [batch_size * num_features, num_patches, d_model]
+                num_patches = seq_len = (input_len - patch_len) // stride + 1
+        """
+        x = x.squeeze(-1)  # [batch_size * num_features, input_len]
+        x = x.unfold(-1, self.patch_len, self.stride)
+        return x
+
+class PositionalEncoding(nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        dropout: float,
+    ):
+        super(PositionalEncoding, self).__init__()
+        self.d_model = d_model
+        self.position_encoding = AbsolutePositionEncoding(d_model=d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        """
+        :param x: [batch_size * num_features, seq_len, d_model]
+        :return: [batch_size * num_features, seq_len, d_model]
+        """
+        x = x + self.position_encoding(x)
+        return self.dropout(x)
+class PatchEmbedding(nn.Module):
+    def __init__(
+        self,
+        patch_len: int,
+        d_model: int,
+    ):
+        super(PatchEmbedding, self).__init__()
+        self.patch_embedding = nn.Linear(patch_len, d_model, bias=True)
+
+    def forward(self, x):
+        """
+        :param x: [batch_size * num_features, seq_len, patch_len]
+        :return: [batch_size * num_features, seq_len, d_model]
+        """
+        x = self.patch_embedding(x)
+        return x
+
+
+
+def generate_causal_mask(seq_len):
+    mask = torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool), diagonal=1)
+    # in nn.MultiheadAttention
+    # binary mask is used and True means not allowed to attend
+    # so we use triu instead of tril
+    return mask
+
+
+class TransformerEncoderBlock(nn.Module):
+    def __init__(
+        self, d_model: int, num_heads: int, feedforward_dim: int, dropout: float
+    ):
+        super(TransformerEncoderBlock, self).__init__()
+
+        self.attention = nn.MultiheadAttention(
+            embed_dim=d_model, num_heads=num_heads, dropout=dropout, batch_first=True
+        )
+        self.norm1 = nn.LayerNorm(d_model)
+        self.ff = nn.Sequential(
+            nn.Linear(d_model, feedforward_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(feedforward_dim, d_model),
+        )
+        self.conv1 = nn.Conv1d(in_channels=d_model, out_channels=feedforward_dim, kernel_size=1)
+        self.activation = nn.GELU()
+        self.conv2 = nn.Conv1d(in_channels=feedforward_dim, out_channels=d_model, kernel_size=1)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x, mask):
+        """
+        :param x: [batch_size * num_features, seq_len, d_model]
+        :param mask: [1, 1, seq_len, seq_len]
+        :return: [batch_size * num_features, seq_len, d_model]
+        """
+        # Self-attention
+        attn_output, _ = self.attention(x, x, x, attn_mask=mask)
+        x = self.norm1(x + self.dropout(attn_output))
+
+        # Feed-forward network
+        ff_output = self.ff(x)
+        output = self.norm2(x + self.dropout(ff_output))
+
+        return output
+
+
+class CausalTransformer(nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        num_layers: int,
+        feedforward_dim: int,
+        dropout: float,
+    ):
+        super(CausalTransformer, self).__init__()
+
+        self.layers = nn.ModuleList(
+            [
+                TransformerEncoderBlock(d_model, num_heads, feedforward_dim, dropout)
+                for _ in range(num_layers)
+            ]
+        )
+        self.norm = nn.LayerNorm(d_model)
+
+    def forward(self, x, is_mask=True):
+        # x: [batch_size * num_features, seq_len, d_model]
+        seq_len = x.size(1)
+        mask = generate_causal_mask(seq_len).to(x.device) if is_mask else None
+        for layer in self.layers:
+            x = layer(x, mask)
+
+        x = self.norm(x)
+        return x
+
+
+
+class Diffusion(nn.Module):
+    def __init__(
+        self,
+        time_steps: int,
+        device: torch.device,
+        scheduler: str = "cosine",
+    ):
+        super(Diffusion, self).__init__()
+        self.device = device
+        self.time_steps = time_steps
+
+        if scheduler == "cosine":
+            self.betas = self._cosine_beta_schedule().to(self.device)
+        elif scheduler == "linear":
+            self.betas = self._linear_beta_schedule().to(self.device)
+        else:
+            raise ValueError(f"Invalid scheduler: {scheduler=}")
+
+        self.alpha = 1 - self.betas
+        self.gamma = torch.cumprod(self.alpha, dim=0).to(self.device)
+
+    def _cosine_beta_schedule(self, s=0.008):
+        steps = self.time_steps + 1
+        x = torch.linspace(0, self.time_steps, steps)
+        alphas_cumprod = (
+            torch.cos(((x / self.time_steps) + s) / (1 + s) * torch.pi * 0.5) ** 2
+        )
+        alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
+        betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
+        return torch.clip(betas, 0, 0.999)
+
+    def _linear_beta_schedule(self, beta_start=1e-4, beta_end=0.02):
+        betas = torch.linspace(beta_start, beta_end, self.time_steps)
+        return betas
+
+    def sample_time_steps(self, shape):
+        return torch.randint(0, self.time_steps, shape, device=self.device)
+
+    def noise(self, x, t):
+        noise = torch.randn_like(x)
+        gamma_t = self.gamma[t].unsqueeze(-1)  # [batch_size * num_features, seq_len, 1]
+        # x_t = sqrt(gamma_t) * x + sqrt(1 - gamma_t) * noise
+        noisy_x = torch.sqrt(gamma_t) * x + torch.sqrt(1 - gamma_t) * noise
+        return noisy_x, noise
+
+    def forward(self, x):
+        # x: [batch_size * num_features, seq_len, patch_len]
+        t = self.sample_time_steps(x.shape[:2])  # [batch_size * num_features, seq_len]
+        noisy_x, noise = self.noise(x, t)
+        return noisy_x, noise, t
+
+    def noise_with_t(self, x, t):
+        """手动指定时间步t添加噪声"""
+        noise = torch.randn_like(x)
+        gamma_t = self.gamma[t].unsqueeze(-1)  # [batch*features, seq_len, 1]
+        noisy_x = torch.sqrt(gamma_t) * x + torch.sqrt(1 - gamma_t) * noise
+        return noisy_x, noise
 
 def calculate_scales_optimized(data, num_scales=3, max_lag=63, peak_threshold=0.3):
     """完全基于PyTorch的优化实现"""
@@ -402,71 +641,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class LearnableMultiScaleDecomp(nn.Module):
-    def __init__(self, nvar, scales=[17, 45, 87]):
-        super().__init__()
-        self.nvar = nvar
-        self.scales = [k if k % 2 == 1 else k + 1 for k in scales]
-        self.num_scales = len(scales)
-
-        # 多尺度卷积组
-        self.conv_layers = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv1d(nvar, nvar, kernel_size=k, padding=(k-1)//2, groups=nvar, bias=False),
-                nn.InstanceNorm1d(nvar)
-            ) for k in self.scales
-        ])
-
-        # 动态权重生成器（修正分组维度）
-        self.weight_gen = nn.Sequential(
-            # 输入通道nvar，输出nvar*16，分组数nvar（确保可整除）
-            nn.Conv1d(nvar, nvar*16, kernel_size=3, padding=1, groups=nvar),
-            nn.GELU(),
-            # 输出通道调整为nvar*num_scales，保持分组数nvar
-            nn.Conv1d(nvar*16, nvar*self.num_scales, kernel_size=3, padding=1, groups=nvar)
-        )
-
-        self._initialize_weights()
-
-    def _initialize_weights(self):
-        for conv in self.conv_layers:
-            kernel_size = conv[0].kernel_size[0]
-            conv[0].weight.data = torch.ones_like(conv[0].weight) / kernel_size
-
-        nn.init.normal_(self.weight_gen[0].weight, mean=0, std=0.01)
-        nn.init.constant_(self.weight_gen[0].bias, 0.1)
-        # 最后一层初始化调整为nvar*num_scales
-        nn.init.normal_(self.weight_gen[-1].weight, mean=0, std=0.01/self.num_scales)
-
-    def forward(self, x):
-        B, L, C = x.shape
-        x = x.permute(0, 2, 1)  # [B, C, L]
-
-        # 多尺度趋势提取（保持[B, C, L, K]结构）
-        trends = []
-        for conv in self.conv_layers:
-            trend = conv(x)  # [B, C, L]
-            trends.append(trend.unsqueeze(-1))  # [B, C, L, 1]
-        trends = torch.cat(trends, dim=-1)  # [B, C, L, K=3]
-
-        # 动态权重处理（维度对齐）
-        weights = self.weight_gen(x)  # [B, C*K, L]
-        weights = weights.view(B, self.nvar, self.num_scales, L)  # [B, C, K, L]
-        weights = F.softmax(weights, dim=2)  # 沿K维度归一化
-
-        # 维度对齐运算（关键修正）
-        fused_trend = torch.einsum('bclk,bckl->bcl', trends, weights)
-
-
-
-        seasonal = x - fused_trend
-        # 频域约束
-        trend_fft = torch.fft.rfft(fused_trend, dim=2)  # 时间维度为dim=2
-        freq_loss = torch.mean(torch.abs(trend_fft[..., 3:]) ** 2)  # 取高频分量
-        # 正交约束
-        orth_loss = torch.mean(torch.mean(seasonal * fused_trend, dim=2)) ** 2  # [B,C,L]逐点相乘后求和
-        smoothness = torch.mean(torch.diff(fused_trend, n=2, dim=2) ** 2)
-        return seasonal.permute(0, 2, 1), fused_trend.permute(0, 2, 1),freq_loss,orth_loss,smoothness
 
 class TrendExtractorConv(nn.Module):
     def __init__(self, input_dim, d_model, kernel_size=3):
@@ -649,22 +823,9 @@ class Model(nn.Module):
             input_dim=self.d_model,
             d_model=self.d_model
         )
-        # 在 Model 类中替换 ConditionalEncoding
-        # self.conditional_encoding_att = SeqAttention(
-        #     target_dim=self.d_model,
-        #     num_heads=self.num_heads,
-        #     embed_dim=self.d_model,
-        #     dropout=self.dropout,
-        # )
+
         # Decoder
         if self.task_name == "pretrain":
-            self.denoising_patch_decoder = DenoisingPatchDecoder(
-                d_model=configs.d_model,
-                num_layers=configs.d_layers,
-                num_heads=configs.n_heads,
-                feedforward_dim=configs.d_ff,
-                dropout=configs.dropout,
-            )
 
 
             self.projection = nn.ModuleList(
@@ -677,10 +838,7 @@ class Model(nn.Module):
                     for i in range(configs.down_sampling_layers + 1)
                 ]
             )
-            self.regression = nn.ModuleList([
-                nn.Linear(self.input_len // (configs.down_sampling_window ** i), self.input_len)
-                for i in range(configs.down_sampling_layers + 1)
-            ])
+
             self.regression = nn.ModuleList([
                 nn.Linear(self.input_len, self.input_len)
                 for i in range(configs.down_sampling_layers + 1)
@@ -696,16 +854,6 @@ class Model(nn.Module):
             #     dropout=configs.head_dropout,
             # )
 
-            self.head = nn.ModuleList(
-                [FlattenHead(
-                    seq_len=self.seq_len // (configs.down_sampling_window ** i),
-                    d_model=self.d_model,
-                    pred_len=configs.pred_len,
-                    dropout=configs.head_dropout,
-                )
-                    for i in range(configs.down_sampling_layers + 1)
-                ]
-            )
 
             # self.regression = nn.Linear(self.input_len, configs.pred_len)
             self.regression = nn.ModuleList([
@@ -760,12 +908,6 @@ class Model(nn.Module):
             self.log_var_season_freq = nn.Parameter(torch.tensor(self.configs.log_var_season_freq), requires_grad=True)
             self.log_var_recon = nn.Parameter(torch.tensor(self.configs.log_var_recon), requires_grad=True)
 
-        # self.log_var_freq = nn.Parameter(torch.log(torch.tensor(0.1)))
-        # self.log_var_orth = nn.Parameter(torch.log(torch.tensor(0.1)))
-        # self.log_var_smooth = nn.Parameter(torch.log(torch.tensor(0.1)))
-        # self.log_var_season_freq = nn.Parameter(torch.log(torch.tensor(0.1)))
-        # self.log_var_recon = nn.Parameter(torch.log(torch.tensor(0.1)))
-
 
         self.decomp_multi = series_decomp(95)
         self.decomp_multi_learnable = StopLearnableMultiScaleDecomp(self.configs.c_out,max_lag=self.configs.max_lag,num_scales=self.configs.num_scales,peak_threshold=self.configs.peak_threshold,distance=self.configs.distance)
@@ -781,16 +923,6 @@ class Model(nn.Module):
         # self.decomp_multi_learnable_second = LearnableMultiScaleDecomp(self.patch_len,scales=[5, 13, 25])
         # self.decomp_multi_learnable_third = LearnableMultiScaleDecomp(self.d_model,scales=[5, 13, 25])
         self.denoise_layers_num = configs.denoise_layers_num
-        self.denoise_layers = nn.ModuleList([
-            DenoisingPatchDecoder(
-                d_model=configs.d_model,
-                num_layers=configs.d_layers,
-                num_heads=configs.n_heads,
-                feedforward_dim=configs.d_ff,
-                dropout=configs.dropout,
-            )
-            for _ in range(self.denoise_layers_num)
-        ])
 
         self.denoise_layers_cond = nn.ModuleList([
             DenoisingConditionDecoder(
