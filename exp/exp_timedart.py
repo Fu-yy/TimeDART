@@ -357,13 +357,15 @@ class Exp_TimeDART(Exp_Basic):
                     'recon': loss_recon,
                 },
 
-
+                model_loss = diff_loss
                 total_loss, adaptive_factors, factor_hist_item = self.loss_balancer(log_loss_dict[0],
                                                                                device=self.device)
                 for name in self.loss_names:
                     resourcce_loss_dict_hist[name].append(log_loss_dict[0][name].item())
                     # adaptive_factors[name] 也是对应的权重
                     factor_item_hist[name].append(factor_hist_item[name])
+                if self.args.use_loss_compute != 1:
+                    total_loss = model_loss
                 diff_loss = total_loss
 
                 # -----
@@ -394,7 +396,7 @@ class Exp_TimeDART(Exp_Basic):
             with open(filename, 'wb') as f:
                 pickle.dump(hist_dict, f)
 
-        # # ---- 1. 各loss分量随step变化 ----
+        # ---- 1. 各loss分量随step变化 ----
         # plt.figure(figsize=(20, 6))
         # for name in self.loss_names:
         #     downsampled = downsample(resourcce_loss_dict_hist[name])
@@ -553,7 +555,7 @@ class Exp_TimeDART(Exp_Basic):
                     loss_freq = torch.tensor(0.0)  # 2.3
                 if self.args.del_recon_loss == 1:
                     loss_recon = torch.tensor(0.0)
-
+                model_loss = loss
                 log_loss_dict = {  # 原始输出loss
                     'diff': loss,
                     'freq': loss_freq,
@@ -569,6 +571,8 @@ class Exp_TimeDART(Exp_Basic):
                     resourcce_loss_dict_hist[name].append(log_loss_dict[0][name].item())
                     # adaptive_factors[name] 也是对应的权重
                     factor_item_hist[name].append(factor_hist_item[name])
+                if self.args.use_loss_compute != 1:
+                    total_loss = model_loss
                 loss = total_loss
                 # loss = loss + loss_freq + loss_orth + loss_smooth + loss_season_freq +loss_recon
 
@@ -646,7 +650,7 @@ class Exp_TimeDART(Exp_Basic):
             with open(filename, 'wb') as f:
                 pickle.dump(hist_dict, f)
 
-        # # ---- 1. 各loss分量随step变化 ----
+        # ---- 1. 各loss分量随step变化 ----
         # plt.figure(figsize=(20, 6))
         # for name in self.loss_names:
         #     downsampled = downsample(resourcce_loss_dict_hist[name])
@@ -785,10 +789,26 @@ class Exp_TimeDART(Exp_Basic):
         formatted_time = now.strftime("%Y-%m-%d %H:%M:%S")
         # print("当前时间:", formatted_time)
         f.write(
-            "{0}->{1}, {2:.3f}, {3:.3f},{4} \n".format(
-                self.args.input_len, self.args.pred_len, mse, mae,formatted_time
-            )
-        )
+            "{0}->{1}, {2:.3f}, {3:.3f},{4},{5},{6},{7},log_var_orth={8},log_var_season_freq={9},log_var_freq={10},use_loss_compute={11},use_new_decomp={12},use_denoise={13},log_var_season_freq={14},{15}_{16}_{17}_{18}inner_{19}_{20}_{21}_{22} \n".format(
+                self.args.input_len, self.args.pred_len, mse, mae,formatted_time,self.args.d_model,
+                self.args.batch_size,self.args.n_heads,self.args.log_var_orth,self.args.log_var_season_freq,
+                self.args.log_var_freq,
+                self.args.use_loss_compute,self.args.use_new_decomp,self.args.use_denoise,self.args.use_inner_new_decomp,
+
+                self.args.max_lag,
+                self.args.num_scales,
+                self.args.peak_threshold,
+                self.args.distance,
+                self.args.max_lag_inner,
+                self.args.num_scales_inner,
+                self.args.peak_threshold_inner,
+                self.args.distance_inner,
+
+
+
+
+
+            ))
         f.close()
         np.save(folder_path+os.sep+ 'metrics.npy', np.array([mae, mse, rmse, mape, mspe]))
         np.save(folder_path+os.sep+'pred.npy', preds)

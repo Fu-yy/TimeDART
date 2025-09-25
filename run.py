@@ -206,17 +206,14 @@ parser.add_argument('--mask_rate', type=float, default=0.5, help='mask ratio')
 parser.add_argument('--seq_len', type=int, default=96, help='seq_len')
 parser.add_argument('--denoise_layers_num', type=int, default=3, help='denoise_layers_num')
 parser.add_argument('--inverse', action='store_true', help='inverse output data', default=False)
-parser.add_argument('--downstream_task', help='inverse output data', default='forecast')
-parser.add_argument('--use_norm', type=bool, default=True)
-parser.add_argument('--mask_ratio', type=int, default=0.1)
 
 
 # loss
 parser.add_argument('--del_orth_loss',type=int,help='del_orth_loss', default=0)
 parser.add_argument('--del_season_freq_loss', type=int, help='del_season_freq_loss', default=0)
-parser.add_argument('--del_smoothness_loss',type=int,help='del_smoothness_loss', default=1)
+parser.add_argument('--del_smoothness_loss',type=int,help='del_smoothness_loss', default=0)
 parser.add_argument('--del_freq_loss', type=int, help='del_freq_loss', default=0)
-parser.add_argument('--del_recon_loss', type=int, help='del_recon_loss', default=1)
+parser.add_argument('--del_recon_loss', type=int, help='del_recon_loss', default=0)
 
 
 parser.add_argument('--log_var_freq',type=float,help='del_orth_loss', default=0.2)
@@ -225,13 +222,29 @@ parser.add_argument('--log_var_smooth',type=float,help='del_smoothness_loss', de
 parser.add_argument('--log_var_season_freq', type=float, help='del_freq_loss', default=4.0)
 
 parser.add_argument('--log_var_recon', type=float, help='del_freq_loss', default=0.1)
-parser.add_argument('--use_init_loss', type=int, help='del_freq_loss', default=0)
-
-
-parser.add_argument('--use_new_decomp', type=int, help='use_new_decomp', default=1)
-parser.add_argument('--use_defire_noise', type=int, help='use_defire_noise', default=1)
+parser.add_argument('--use_defire_noise', type=int, help='use_defire_noise', default=0)
 parser.add_argument('--use_trend_layer', type=int, help='use_trend_layer', default=1)
+parser.add_argument('--use_positional_encoding', type=int, help='use_positional_encoding', default=1)
+parser.add_argument('--use_sostoken', type=int, help='use_sostoken', default=1)
+parser.add_argument('--use_init_loss', type=int, help='del_freq_loss', default=0)
+parser.add_argument('--use_inner_encoder', type=int, help='use_inner_encoder', default=1)
+
+parser.add_argument('--use_inner_new_decomp', type=int, help='use_inner_new_decomp', default=1)
+parser.add_argument('--use_new_decomp', type=int, help='use_new_decomp', default=1)
 parser.add_argument('--use_denoise', type=int, help='use_denoise', default=1)
+parser.add_argument('--use_loss_compute', type=int, help='use_loss_compute', default=1)
+
+
+parser.add_argument('--max_lag', type=int, help='max_lag', default=63)
+parser.add_argument('--num_scales', type=int, help='num_scales', default=4)
+parser.add_argument('--peak_threshold', type=float, help='peak_threshold', default=0.3)
+parser.add_argument('--distance', type=int, help='distance', default=10)
+
+
+parser.add_argument('--max_lag_inner', type=int, help='max_lag_inner', default=31)
+parser.add_argument('--num_scales_inner', type=int, help='num_scales_inner', default=4)
+parser.add_argument('--peak_threshold_inner', type=float, help='peak_threshold_inner', default=0.1)
+parser.add_argument('--distance_inner', type=int, help='distance_inner', default=3)
 
 
 args = parser.parse_args()

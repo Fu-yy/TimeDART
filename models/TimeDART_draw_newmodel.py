@@ -1,9 +1,10 @@
+import numpy as np
 import torch
 import torch.nn as nn
 from einops import rearrange, repeat
 import pandas as pd
 from scipy.signal import find_peaks
-
+import seaborn as sns
 from layers.Autoformer_EncDec import moving_avg, series_decomp
 from layers.Transformer_EncDec import Decoder, DecoderLayer, Encoder, EncoderLayer
 # from layers.SelfAttention_Family import DSAttention, AttentionLayer, FullAttention
@@ -15,6 +16,8 @@ from layers.TimeDART_EncDec import (
     DenoisingPatchDecoder,
 )
 from layers.Embed import Patch, PatchEmbedding, PositionalEncoding
+from models.TimeDART_draw import plot_line_charts, plot_smooth_raw_heatmaps, comprehensive_decomposition_eval, \
+    create_comparison_table, plot_smooth_raw_heatmaps_smoothmore
 from utils.augmentations import masked_data
 import torch.nn.functional as F
 import torch
@@ -24,6 +27,8 @@ import torch.nn as nn
 import matplotlib.pyplot as plt
 # TimeDART_version2
 # 只保留15分解，用新的分解策略
+from data_provider.data_factory_draw import data_provider
+import numpy as np
 
 
 def calculate_scales_optimized(data, num_scales=3, max_lag=63, peak_threshold=0.3):
@@ -184,7 +189,74 @@ def calculate_scales_optimized_toech(data,init_conv_kernel=[15, 31, 63,95], num_
         while len(last_scales) < num_scales:
             last_scales.append(default_scales[-1])
 
-    return sorted(last_scales[:num_scales])
+    return sorted(last_scales[:num_scales])#,peaks
+
+
+
+def calculate_scales_optimized_toech_for_fig(data, init_conv_kernel=[15, 31, 63, 95], num_scales=3, max_lag=63, peak_threshold=0.3, distance=10):
+    # 数据预处理 [B, L, C] -> [B, C, L]
+    x = data.permute(0, 2, 1).contiguous()
+    B, C, L = x.shape
+    max_lag = min(max_lag, L - 1)
+    # 批标准化
+    x_mean = x.mean(dim=2, keepdim=True)
+    x_centered = x - x_mean
+    x_norm = x_centered / (x_centered.std(dim=2, keepdim=True) + 1e-8)
+
+    # FFT加速自相关计算（优化填充尺寸）
+    pad_size = L - 1
+    x_padded = torch.nn.functional.pad(x_norm, (0, pad_size))
+    fft_x = torch.fft.rfft(x_padded, dim=2)
+    acf = torch.fft.irfft(fft_x * fft_x.conj(), dim=2)[..., :L]
+    acf = acf / (acf[..., :1] + 1e-8)
+
+    # 聚合所有通道和批次
+    mean_acf = acf.mean(dim=(0, 1))  # [L]
+
+    # GPU峰值检测
+    peaks = find_peaks_torch(
+        mean_acf[1:max_lag],
+        height=peak_threshold,
+        distance=distance,
+        max_num=num_scales * 2
+    )
+    peaks += 1  # 滞后值修正
+
+    # 选择主要尺度
+    if len(peaks) == 0:
+        last_scales = init_conv_kernel[:num_scales]
+    else:
+        hist = torch.histc(peaks.float(), bins=max_lag, min=0, max=max_lag - 1)
+        hist = hist.to(device=peaks.device)
+        scales = []
+        for _ in range(num_scales):
+            max_bin = hist.argmax()
+            if hist[max_bin] <= 0:
+                break
+            scales.append(max_bin.item())
+            start = max(0, max_bin - 5)
+            end = max_bin + 6
+            hist[start:end] = 0
+
+        last_scales = [s if s % 2 else s + 1 for s in scales[:num_scales]]
+        # 补足长度
+        if len(scales) < num_scales:
+            default_scales = init_conv_kernel
+            for s in default_scales:
+                if s not in last_scales:
+                    last_scales.append(s)
+                    if len(last_scales) == num_scales:
+                        break
+            while len(last_scales) < num_scales:
+                last_scales.append(default_scales[-1])
+
+    # ====== 裁剪到 ACF 范围内 ======
+    max_valid_idx = len(mean_acf) - 1
+    last_scales = [s for s in last_scales if s <= max_valid_idx]
+    peaks = peaks[peaks <= max_valid_idx]
+
+    return mean_acf, sorted(last_scales[:num_scales]), peaks
+
 class FixedMultiScaleConv(nn.Module):
     def __init__(self, nvar, scales):
         super().__init__()
@@ -221,7 +293,7 @@ class LightWeightGenerator(nn.Module):
 
 
 class StopLearnableMultiScaleDecomp(nn.Module):
-    def __init__(self, nvar,num_scales,max_lag,peak_threshold,distance):
+    def __init__(self, nvar,num_scales,max_lag,peak_threshold,distance,configs):
         super().__init__()
         self.nvar = nvar
         # 延迟初始化的组件
@@ -231,6 +303,7 @@ class StopLearnableMultiScaleDecomp(nn.Module):
         self.scales = None  # 保存计算得到的scales
         self.num_scales = num_scales
         self.max_lag = max_lag
+        self.configs = configs
         # 多尺度卷积组（固定参数）
         # self.fixed_convs = FixedMultiScaleConv(nvar, scales)
 
@@ -238,7 +311,7 @@ class StopLearnableMultiScaleDecomp(nn.Module):
         self.weight_gen = LightWeightGenerator(nvar, self.num_scales)
         # self.weight_gen = None
         # self.local_encoder = nn.Conv1d(nvar, nvar, 3, padding=1, groups=nvar)
-    def forward(self, x):
+    def forward(self, x,i):
         # 输入x形状: [Batch, Length, Channels]
         if self.fixed_convs is None:
             # 动态计算scales（基于当前批次数据）
@@ -270,6 +343,101 @@ class StopLearnableMultiScaleDecomp(nn.Module):
             # self.weight_gen.to(x.device)
 
 
+        # ========================== visio for peaks and scales ==========================
+
+
+        import torch.nn.functional as F
+        import matplotlib.pyplot as plt
+
+        def plot_acf_with_scales(mean_acf, peaks, scales, save_path=None,
+                                 title="Autocorrelation, Peaks, and Selected Scales"):
+            """
+            绘制完整ACF、自相关峰值以及最终选择的尺度
+
+            参数：
+                mean_acf : 1D array-like，自相关曲线 (长度 L)
+                peaks    : 1D array-like，检测到的局部峰值位置
+                scales   : 1D array-like，最终选择的主要尺度
+                save_path: str，可选，保存路径 (如果为None则不保存)
+                title    : str，图标题
+            """
+            # 转 numpy
+            mean_acf = np.array(mean_acf.detach().numpy())
+            peaks = np.array(peaks.detach().numpy())
+            scales = np.array(scales)
+
+            plt.figure(figsize=(7, 4))
+            # 画ACF
+            plt.plot(mean_acf, color='blue', linewidth=2, label="Mean ACF")
+            # 画所有峰值
+            if len(peaks) > 0:
+                plt.scatter(peaks, mean_acf[peaks], color='red', s=50, zorder=5, label="Detected Peaks")
+            # 画最终选择的尺度
+            if len(scales) > 0:
+                plt.scatter(scales, mean_acf[scales], color='green', s=100, marker='*', zorder=6,
+                            label="Selected Scales")
+
+            # 美化
+            plt.xlabel("Lag")
+            plt.ylabel("ACF")
+            plt.title(title)
+            plt.legend()
+            plt.grid(alpha=0.3)
+            plt.tight_layout()
+
+            # 保存或显示
+            if save_path:
+                plt.savefig(save_path, dpi=300)
+
+        out = calculate_scales_optimized_toech_for_fig(
+            x,
+            num_scales=self.num_scales,
+            distance=self.distance,
+            peak_threshold=self.peak_threshold,
+            max_lag=self.max_lag,
+            # peak_threshold=self.peak_threshold
+        )
+        project_path = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
+
+        path = project_path + os.sep+'all_draw_figs'+os.sep+self.configs.task_name+os.sep + 'decomp_visio' + os.sep + self.configs.data + os.sep+str(self.configs.pred_len)+os.sep
+        if not os.path.exists(path):
+            os.makedirs(path)
+        if len(out) == 3:
+            mean_acf, scales, peaks = out
+
+
+            plot_acf_with_scales(mean_acf,peaks,scales,save_path=path + str(i) + '_'+self.configs.task_name +  self.configs.data + str(self.configs.pred_len) +'_acf.png')
+
+        else:
+            scales, peaks = out
+
+        # ======== 绘图 ========
+        # if len(peaks) != 0:
+        #     plt.figure(figsize=(6, 4))
+        #     scales = torch.tensor(scales) if isinstance(scales, list) else scales
+        #     peaks = torch.tensor(peaks) if isinstance(peaks, list) else peaks
+        #
+        #     plt.plot(scales.numpy(), label="Mean ACF")
+        #     plt.scatter(peaks.numpy(), scales.numpy(), color='red', zorder=5, label="Detected Peaks")
+        #     plt.xlabel("Lag")
+        #     plt.ylabel("ACF")
+        #     plt.title("Autocorrelation & Detected Peaks ")
+        #     plt.legend()
+        #     plt.tight_layout()
+        #     plt.savefig(path + str(i) + '_peaks.png')
+        #
+        #     # ======== 绘制直方图 ========
+        #     plt.figure(figsize=(6, 4))
+        #     plt.hist(peaks.numpy(), bins=np.arange(0, 64, 2), color="gray", edgecolor="black")
+        #     plt.title("Peak Lag Distribution")
+        #     plt.xlabel("Lag (bin)")
+        #     plt.ylabel("Count")
+        #     plt.tight_layout()
+        #     plt.savefig(path + str(i) + '_Lag.png')
+
+        # ========================== visio for peaks and scales ==========================
+
+
 
         # 输入形状: [Batch, Length, Channels]
         B, L, C = x.shape
@@ -286,6 +454,47 @@ class StopLearnableMultiScaleDecomp(nn.Module):
 
         # 生成融合权重
         weights = self.weight_gen(x)  # [B,C,K,1]
+
+
+
+        # -------------------------------------------  绘制 heatmap for weight------------------
+
+
+        # ======== 获取权重 ========
+        weights_mean = weights.squeeze(-1).mean(dim=0)
+        weights_mean  = weights_mean.unsqueeze(0)  # [C,K]
+        plot_smooth_raw_heatmaps_smoothmore([weights_mean],titles=["Scale Weights"],show_grid=False, path=path, name=str(i) + self.configs.task_name +  self.configs.data + str(self.configs.pred_len) +'_weight_heatmap.png')
+        # # ======== 自动生成横轴（1,2,3,4） ========
+        # xticks = [f"S{i + 1}" for i in range(weights_mean.shape[1])]
+        # yticks = [f"Var{i}" for i in range(weights_mean.shape[0])]
+        #
+        # # ======== 绘制紧凑型 heatmap ========
+        # plt.figure(figsize=(1 + weights_mean.shape[1], 0.8 + weights_mean.shape[0]))
+        # ax = sns.heatmap(weights_mean, annot=False, cmap="Blues",
+        #             xticklabels=xticks, yticklabels=yticks,
+        #             cbar_kws={'label': 'Weight'}, square=False)
+        # h, w = weights_mean.shape
+        # ax.set_aspect(w / h)  # 关键：让整个热图是正方形
+        #
+        # # 反转 y 轴，让 Var0 在最上面
+        # plt.gca().invert_yaxis()
+        #
+        # plt.title("Scale Weights (averaged over batch)")
+        # plt.xlabel("Scales (Index)")
+        # plt.ylabel("Variables")
+        # plt.tight_layout()
+        # plt.savefig(path + str(i) + '_heatmap.png')
+
+        # -------------------------------------------  绘制 heatmap for weight------------------
+
+
+
+
+
+
+
+
+
         weights = weights.permute(0,1,3,2)
         # 加权融合（广播机制）
         fused_trend = (trends * weights).sum(dim=-1)  # [B,C,L]
@@ -341,6 +550,30 @@ class StopLearnableMultiScaleDecomp(nn.Module):
             smooth_loss = 0.6 * second_diff + 0.4 * first_diff
         # # 重构约束
         recon_loss = F.l1_loss(x, seasonal + fused_trend)
+
+
+
+        # ------------------------------- 绘制 frequency map
+
+        sample_idx = 0
+        var_idx = 0
+        # ======== 选同一个样本 & 变量 ========
+        trend_fft = torch.fft.rfft(fused_trend[sample_idx, var_idx, :]).abs().detach().numpy()
+        seasonal_fft = torch.fft.rfft(seasonal[sample_idx, var_idx, :]).abs().detach().numpy()
+        freqs = np.fft.rfftfreq(L, d=1)  # 频率刻度
+
+        # ======== 绘图 ========
+        plt.figure(figsize=(8, 4))
+        plt.plot(freqs, trend_fft, label="Trend FFT", linewidth=2)
+        plt.plot(freqs, seasonal_fft, label="Seasonal FFT", linestyle="--")
+        plt.title(f"Frequency Spectrum (Sample {sample_idx}, Var {var_idx})")
+        plt.xlabel("Frequency")
+        plt.ylabel("Magnitude")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(path + str(i)+'_' + self.configs.task_name +  self.configs.data + str(self.configs.pred_len) +'_frequency.png')
+
+        # ------------------------------- 绘制 frequency map
         return seasonal.permute(0, 2, 1), fused_trend.permute(0, 2, 1), trend_freq_loss,orth_loss,smooth_loss,season_freq_loss,recon_loss
 def plot_tensors(tensor_list,file_name,index):
     project_path = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
@@ -767,10 +1000,10 @@ class Model(nn.Module):
         # self.log_var_recon = nn.Parameter(torch.log(torch.tensor(0.1)))
 
 
-        self.decomp_multi = series_decomp(95)
-        self.decomp_multi_learnable = StopLearnableMultiScaleDecomp(self.configs.c_out,max_lag=self.configs.max_lag,num_scales=self.configs.num_scales,peak_threshold=self.configs.peak_threshold,distance=self.configs.distance)
+        self.decomp_multi = series_decomp(25)
+        self.decomp_multi_learnable = StopLearnableMultiScaleDecomp(self.configs.c_out,max_lag=self.configs.max_lag,num_scales=self.configs.num_scales,peak_threshold=self.configs.peak_threshold,distance=self.configs.distance,configs=self.configs)
         # self.decomp_multi_learnable_second = StopLearnableMultiScaleDecomp(self.patch_len,num_scales=4)
-        self.decomp_multi_learnable_third = StopLearnableMultiScaleDecomp(self.d_model, max_lag=self.configs.max_lag_inner,num_scales=self.configs.num_scales_inner,peak_threshold=self.configs.peak_threshold_inner,distance=self.configs.distance_inner)
+        self.decomp_multi_learnable_third = StopLearnableMultiScaleDecomp(self.d_model, max_lag=self.configs.max_lag_inner,num_scales=self.configs.num_scales_inner,peak_threshold=self.configs.peak_threshold_inner,distance=self.configs.distance_inner,configs=self.configs)
         #
 
         # self.decomp_multi_learnable = StopLearnableMultiScaleDecomp(self.configs.c_out,max_lag=63,num_scales=1,peak_threshold=0.3,distance=10)
@@ -817,7 +1050,7 @@ class Model(nn.Module):
             # self.log_var_season_freq.data = torch.log(season_freq_loss + 1e-8)
             # self.log_var_recon.data = torch.log(recon_loss + 1e-8)
 
-    def pretrain(self, x,x_mask,i=0):
+    def pretrain(self, x,i=0):
 
         # [batch_size, input_len, num_features]
         # Instance Normalization
@@ -838,11 +1071,32 @@ class Model(nn.Module):
         x = x / stdevs  # [batch_size, input_len, num_features]
         # x = self.inverse_embedding(x.permute(0,2,1)).permute(0,2,1)
         # 分解  1
-        if self.configs.use_new_decomp == 1:
-            x, trend,freq_loss,orth_loss,smoothness,season_freq_loss,recon_loss = self.decomp_multi_learnable(x)
-        else:
-            x, trend = self.decomp_multi(x)
-            freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss = torch.tensor(0.0), torch.tensor(0.0), torch.tensor(0.0), torch.tensor(0.0),torch.tensor(0.0)
+
+        list_ts = []
+        list_ts_mov = []
+        list_ts.append(x)
+        list_ts_mov.append(x)
+        season_mov, trend_mov = self.decomp_multi(x)
+        freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss = torch.tensor(0.0), torch.tensor(
+            0.0), torch.tensor(0.0), torch.tensor(0.0), torch.tensor(0.0)
+        list_ts_mov.append(season_mov)
+        list_ts_mov.append(trend_mov)
+        x, trend,freq_loss,orth_loss,smoothness,season_freq_loss,recon_loss = self.decomp_multi_learnable(x,i)
+
+
+
+
+
+        list_ts.append(x)
+        list_ts.append(trend)
+
+        project_path = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
+
+        path = project_path + os.sep+'all_draw_figs'+os.sep+self.configs.task_name+ os.sep+  'visiofigs'  + os.sep + self.configs.data + os.sep + str(self.configs.pred_len) + os.sep
+
+        plot_line_charts(list_ts,['source','season','trend'],path=path,name=str(i)+"_"+ self.configs.task_name +  self.configs.data + str(self.configs.pred_len) + '_draw_source_dynamic_fig_')
+        plot_line_charts(list_ts_mov,['source','season','trend'],path=path,name=str(i)+'_'+ self.configs.task_name +  self.configs.data + str(self.configs.pred_len) + '_draw_source_mov_fig_')
+
 
         # x, trend = x,x
         # Channel Independence
@@ -879,6 +1133,13 @@ class Model(nn.Module):
             x_embedding_bias,
             is_mask=True,
         )  # [batch_size * num_features, seq_len, d_model]
+
+
+        freq_loss_inner_list = []
+        orth_loss_inner_list = []
+        smoothness_inner_list = []
+        season_freq_loss_inner_list = []
+
 
         freq_loss_inner_list = []
         orth_loss_inner_list = []
@@ -946,12 +1207,43 @@ class Model(nn.Module):
 
             # 分解  5
             # noise_x_embedding, _ = noise_x_embedding,noise_x_embedding
-            if self.configs.use_inner_new_decomp == 1:
+            x_out_list = []
+            x_out_list.append(x_out)
+            x_out_list_mov = []
+            x_out_list_mov.append(x_out)
 
-                x_out, x_out_trend,freq_loss_inner,orth_loss_inner,smoothness_inner ,season_freq_loss_inner,recon_loss_inner= self.decomp_multi_learnable_third(x_out)
-            else:
-                x_out, x_out_trend = self.decomp_multi(x_out)
-                freq_loss_inner, orth_loss_inner, smoothness_inner, season_freq_loss_inner, recon_loss_inner =  torch.tensor(0.0), torch.tensor(0.0), torch.tensor(0.0), torch.tensor(0.0),torch.tensor(0.0)
+            season_mov, trend_mov = self.decomp_multi(x_out)
+            freq_loss_inner, orth_loss_inner, smoothness_inner, season_freq_loss_inner, recon_loss_inner = torch.tensor(
+                0.0), torch.tensor(0.0), torch.tensor(0.0), torch.tensor(0.0), torch.tensor(0.0)
+            x_out_list_mov.append(season_mov)
+            x_out_list_mov.append(trend_mov)
+
+            x_out, x_out_trend,freq_loss_inner,orth_loss_inner,smoothness_inner ,season_freq_loss_inner,recon_loss_inner= self.decomp_multi_learnable_third(x_out,i)
+
+            x_out_list.append(x_out)
+            x_out_list.append(x_out_trend)
+            project_path = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
+
+            path  = project_path + os.sep+'all_draw_figs'+os.sep+self.configs.task_name + os.sep +'visiofigs'+os.sep+ self.configs.data + os.sep+str(self.configs.pred_len)+os.sep
+
+            plot_smooth_raw_heatmaps(
+                x_out_list,
+                smooth_method='gaussian',
+                sigma=1.5,
+                titles=["Feature Map x", "Feature Map Season", "Feature Map Trend"],
+                layer_idx=layer_idx,
+                path=path,
+                name=str(i) +'_'+ self.configs.task_name +  self.configs.data + str(self.configs.pred_len) +  '_heatmap_layer_idx='
+            )
+            # plot_smooth_raw_heatmaps(
+            #     x_out_list_mov,
+            #     smooth_method='gaussian',
+            #     sigma=1.5,
+            #     titles=["Feature Map x", "Feature Map Season", "Feature Map Trend"],
+            #     layer_idx=layer_idx,
+            #     path=path,
+            #     name=str(i) +'_'+ self.configs.task_name +  self.configs.data + str(self.configs.pred_len) + '_heatmap_mov_layer_idx='
+            # )
 
             # x_out, x_out_trend = x_out,x_out
 
@@ -1025,7 +1317,7 @@ class Model(nn.Module):
 
         return predict_x,total_freq,total_orth,total_smooth,total_season_freq,total_recon_loss
 
-    def forecast(self, x,x_mark):
+    def forecast(self, x,i):
         # x = torch.fft.fft(x,dim=-2).real
 
 
@@ -1038,12 +1330,25 @@ class Model(nn.Module):
         x = x / stdevs
         # x, trend = self.decomp_multi(x)
         # x = self.inverse_embedding(x.permute(0,2,1)).permute(0,2,1)
+        list_ts = []
+        list_ts_mov = []
 
-        if self.configs.use_new_decomp == 1:
-            x, trend,freq_loss,orth_loss,smoothness,season_freq_loss,recon_loss = self.decomp_multi_learnable(x)
-        else:
-            x, trend = self.decomp_multi(x)
-            freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss = torch.tensor(0.0), torch.tensor(0.0), torch.tensor(0.0), torch.tensor(0.0),torch.tensor(0.0)
+        season_mov, trend_mov = self.decomp_multi(x)
+        freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss = torch.tensor(0.0), torch.tensor(
+            0.0), torch.tensor(0.0), torch.tensor(0.0), torch.tensor(0.0)
+
+        list_ts.append(x)
+        list_ts_mov.append(x)
+        list_ts_mov.append(season_mov)
+        list_ts_mov.append(trend_mov)
+
+
+        x, trend,freq_loss,orth_loss,smoothness,season_freq_loss,recon_loss = self.decomp_multi_learnable(x,i)
+
+        list_ts.append(x)
+        list_ts.append(trend)
+
+
 
         # x, trend = x,x
         x = self.channel_independence[0](x)  # [batch_size * num_features, input_len, 1]
@@ -1051,6 +1356,46 @@ class Model(nn.Module):
 
         # x = torch.fft.fft(x,dim=-2).imag
         x = self.enc_embedding(x)  # [batch_size * num_features, seq_len, d_model]
+        project_path = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
+
+        path = project_path + os.sep + 'all_draw_figs' + os.sep + self.configs.task_name + os.sep + 'visiofigs' + os.sep + self.configs.data + os.sep + str(
+            self.configs.pred_len) + os.sep
+        plot_line_charts(list_ts, ['source', 'season', 'trend'], path=path,
+                         name=str(i) + self.configs.task_name + self.configs.data + str(
+                             self.configs.pred_len) + '_draw_source_dynamic_fig')
+        plot_line_charts(list_ts_mov, ['source', 'season', 'trend'], path=path,
+                         name=str(i) + self.configs.task_name + self.configs.data + str(
+                             self.configs.pred_len) + '_draw_source_mov_fig')
+
+        # -------------------------------
+        # 获取评估结果
+        metrics1 = comprehensive_decomposition_eval(list_ts[0][0, :, -1], list_ts[2][0, :, -1], list_ts[1][0, :, -1])
+
+        # 可视化结果
+        # pd.DataFrame(metrics1).T.style.bar(subset=['value'],
+        #                                   align='mid',
+        #                                   color=['#d65f5f', '#5fba7d'])  # 红/绿渐变色
+        metrics2 = comprehensive_decomposition_eval(list_ts_mov[0][0, :, -1], list_ts_mov[2][0, :, -1],
+                                                    list_ts_mov[1][0, :, -1])
+
+        # 可视化结果
+        # pd.DataFrame(metrics2).T.style.bar(subset=['value'],
+        #                                   align='mid',
+        #                                   color=['#d65f5f', '#5fba7d'])  # 红/绿渐变色
+        # 使用示例
+        table_md = create_comparison_table(metrics1, metrics2)
+        print(table_md)
+        # 对比可视化选择
+        # visualize_comparison(metrics1, metrics2, labels=['My Model', 'Baseline'])
+        # radar_plot_comparison(metrics1, metrics2, labels=['My Model', 'Baseline'])
+        # plot_metrics_comparison(metrics1, metrics2)
+        # 或生成交互式图表
+        # interactive_dashboard({
+        #     'My Model': metrics1,
+        #     'Baseline': metrics2
+        # })
+        # -------------------------------
+
 
 
         # --------------------------- 添加条件 begin
@@ -1098,9 +1443,9 @@ class Model(nn.Module):
     def forward(self, batch_x,x_mask,i=0):
 
         if self.task_name == "pretrain":
-            return self.pretrain(batch_x,x_mask,i)
+            return self.pretrain(batch_x,i)
         elif self.task_name == "finetune":
-            dec_out,freq_loss,orth_loss,smoothness,season_freq_loss,recon_loss = self.forecast(batch_x,x_mask)
+            dec_out,freq_loss,orth_loss,smoothness,season_freq_loss,recon_loss = self.forecast(batch_x,i)
             return dec_out[:, -self.pred_len: , :],freq_loss,orth_loss,smoothness,season_freq_loss,recon_loss
         else:
             raise ValueError("task_name should be 'pretrain' or 'finetune'")
@@ -1118,112 +1463,172 @@ def get_config():
     torch.manual_seed(fix_seed)
     np.random.seed(fix_seed)
 
-    parser = argparse.ArgumentParser(description='SimMTM')
+    parser = argparse.ArgumentParser(description="TimeDART")
 
     # basic config
-    parser.add_argument('--task_name', type=str, default='long_term_forecast',
-                        help='task name, options:[long_term_forecast, short_term_forecast, imputation, classification, anomaly_detection]')
-    parser.add_argument('--is_training', type=int, default=1, help='status')
-    parser.add_argument('--model_id', type=str, default='test', help='model id')
-    parser.add_argument('--model', type=str, default='Autoformer',
-                        help='model name, options: [Autoformer, Transformer, TimesNet]')
-
-    parser.add_argument('--train_only', type=bool, required=False, default=False,
-                        help='perform training on full input dataset without validation and testing')
+    parser.add_argument(
+        "--task_name",
+        type=str,
+        required=False,
+        default="pretrain",
+        help="task name, options:[pretrain, finetune]",
+    )
+    parser.add_argument("--is_training", type=int, default=1, help="status")
+    parser.add_argument(
+        "--model_id", type=str, required=False, default="TimeDART", help="model id"
+    )
+    parser.add_argument(
+        "--model", type=str, required=False, default="TimeDART", help="model name"
+    )
 
     # data loader
-    parser.add_argument('--data', type=str, required=False, default='ETTh1', help='dataset type')
-    parser.add_argument('--root_path', type=str, default='./datasets', help='root path of the data file')
-    parser.add_argument('--data_path', type=str, default='ETTh1.csv', help='data file')
-    parser.add_argument('--features', type=str, default='M',
-                        help='forecasting task, options:[M, S, MS]; M:multivariate predict multivariate, S:univariate predict univariate, MS:multivariate predict univariate')
-    parser.add_argument('--target', type=str, default='OT', help='target feature in S or MS task')
-    parser.add_argument('--freq', type=str, default='h',
-                        help='freq for time features encoding, options:[s:secondly, t:minutely, h:hourly, d:daily, b:business days, w:weekly, m:monthly], you can also use more detailed freq like 15min or 3h')
-    parser.add_argument('--checkpoints', type=str, default='./outputs/checkpoints/',
-                        help='location of model fine-tuning checkpoints')
-    parser.add_argument('--pretrain_checkpoints', type=str, default='./outputs/pretrain_checkpoints/',
-                        help='location of model pre-training checkpoints')
-    parser.add_argument('--transfer_checkpoints', type=str, default='ckpt_best.pth',
-                        help='checkpoints we will use to finetune, options:[ckpt_best.pth, ckpt10.pth, ckpt20.pth...]')
-    parser.add_argument('--load_checkpoints', type=str, default=None, help='location of model checkpoints')
-    parser.add_argument('--select_channels', type=float, default=1, help='select the rate of channels to train')
+    parser.add_argument(
+        "--data", type=str, required=False, default="ETTh1", help="dataset type"
+    )
+    parser.add_argument(
+        "--root_path", type=str, default="./datasets", help="root path of the data file"
+    )
+    parser.add_argument("--data_path", type=str, default="ETTh1.csv", help="data file")
+    parser.add_argument(
+        "--features",
+        type=str,
+        default="M",
+        help="forecasting task, options:[M, S, MS]; M:multivariate predict multivariate, S:univariate predict univariate, MS:multivariate predict univariate",
+    )
+    parser.add_argument(
+        "--target", type=str, default="OT", help="target feature in S or MS task"
+    )
+    parser.add_argument(
+        "--freq",
+        type=str,
+        default="h",
+        help="freq for time features encoding, options:[s:secondly, t:minutely, h:hourly, d:daily, b:business days, w:weekly, m:monthly], you can also use more detailed freq like 15min or 3h",
+    )
+    parser.add_argument(
+        "--checkpoints",
+        type=str,
+        default="./outputs/checkpoints/",
+        help="location of model fine-tuning checkpoints",
+    )
+    parser.add_argument(
+        "--pretrain_checkpoints",
+        type=str,
+        default="./outputs/pretrain_checkpoints/",
+        help="location of model pre-training checkpoints",
+    )
+    parser.add_argument(
+        "--transfer_checkpoints",
+        type=str,
+        default="ckpt_best.pth",
+        help="checkpoints we will use to finetune, options:[ckpt_best.pth, ckpt10.pth, ckpt20.pth...]",
+    )
+    parser.add_argument(
+        "--load_checkpoints", type=str, default=None, help="location of model checkpoints"
+    )
+    parser.add_argument(
+        "--select_channels",
+        type=float,
+        default=1,
+        help="select the rate of channels to train",
+    )
 
     # forecasting task
-    parser.add_argument('--seq_len', type=int, default=336, help='input sequence length')
-    parser.add_argument('--label_len', type=int, default=48, help='start token length')
-    parser.add_argument('--pred_len', type=int, default=96, help='prediction sequence length')
-    parser.add_argument('--seasonal_patterns', type=str, default='Monthly', help='subset for M4')
+    parser.add_argument("--input_len", type=int, default=336, help="input sequence length")
+    parser.add_argument("--label_len", type=int, default=0, help="start token length")
+    parser.add_argument(
+        "--pred_len", type=int, default=96, help="prediction sequence length"
+    )
+    parser.add_argument(
+        "--seasonal_patterns", type=str, default="Monthly", help="subset for M4"
+    )
 
     # model define
-    parser.add_argument('--top_k', type=int, default=5, help='for TimesBlock')
-    parser.add_argument('--num_kernels', type=int, default=3, help='for Inception')
-    parser.add_argument('--enc_in', type=int, default=7, help='encoder input size')
-    parser.add_argument('--dec_in', type=int, default=7, help='decoder input size')
-    parser.add_argument('--c_out', type=int, default=7, help='output size')
-    parser.add_argument('--d_model', type=int, default=512, help='dimension of model')
-    parser.add_argument('--n_heads', type=int, default=8, help='num of heads')
-    parser.add_argument('--e_layers', type=int, default=2, help='num of encoder layers')
-    parser.add_argument('--d_layers', type=int, default=1, help='num of decoder layers')
-    parser.add_argument('--d_ff', type=int, default=2048, help='dimension of fcn')
-    parser.add_argument('--moving_avg', type=int, default=25, help='window size of moving average')
-    parser.add_argument('--factor', type=int, default=1, help='attn factor')
-    parser.add_argument('--distil', action='store_false',
-                        help='whether to use distilling in encoder, using this argument means not using distilling',
-                        default=True)
-    parser.add_argument('--dropout', type=float, default=0.1, help='dropout')
-    parser.add_argument('--fc_dropout', type=float, default=0, help='fully connected dropout')
-    parser.add_argument('--head_dropout', type=float, default=0.1, help='head dropout')
-    parser.add_argument('--embed', type=str, default='timeF',
-                        help='time features encoding, options:[timeF, fixed, learned]')
-    parser.add_argument('--activation', type=str, default='gelu', help='activation')
-    parser.add_argument('--output_attention', action='store_true', help='whether to output attention in ecoder')
-    parser.add_argument('--individual', type=int, default=0, help='individual head; True 1 False 0')
-    parser.add_argument('--pct_start', type=float, default=0.3, help='pct_start')
-    parser.add_argument('--patch_len', type=int, default=12, help='path length')
-    parser.add_argument('--stride', type=int, default=12, help='stride')
+    parser.add_argument("--top_k", type=int, default=5, help="for TimesBlock")
+    parser.add_argument("--num_kernels", type=int, default=3, help="for Inception")
+    parser.add_argument("--enc_in", type=int, default=7, help="encoder input size")
+    parser.add_argument("--dec_in", type=int, default=7, help="decoder input size")
+    parser.add_argument("--c_out", type=int, default=7, help="output size")
+    parser.add_argument("--d_model", type=int, default=512, help="dimension of model")
+    parser.add_argument("--n_heads", type=int, default=8, help="num of heads")
+    parser.add_argument("--e_layers", type=int, default=2, help="num of encoder layers")
+    parser.add_argument("--d_layers", type=int, default=1, help="num of decoder layers")
+    parser.add_argument("--d_ff", type=int, default=2048, help="dimension of fcn")
+    parser.add_argument(
+        "--moving_avg", type=int, default=25, help="window size of moving average"
+    )
+    parser.add_argument("--factor", type=int, default=1, help="attn factor")
+    parser.add_argument(
+        "--distil",
+        action="store_false",
+        help="whether to use distilling in encoder, using this argument means not using distilling",
+        default=True,
+    )
+    parser.add_argument("--dropout", type=float, default=0.1, help="dropout")
+    parser.add_argument(
+        "--fc_dropout", type=float, default=0, help="fully connected dropout"
+    )
+    parser.add_argument("--head_dropout", type=float, default=0.1, help="head dropout")
+    parser.add_argument(
+        "--embed",
+        type=str,
+        default="timeF",
+        help="time features encoding, options:[timeF, fixed, learned]",
+    )
+    parser.add_argument("--activation", type=str, default="gelu", help="activation")
+    parser.add_argument(
+        "--output_attention",
+        action="store_true",
+        help="whether to output attention in ecoder",
+    )
+    parser.add_argument(
+        "--individual", type=int, default=0, help="individual head; True 1 False 0"
+    )
+    parser.add_argument("--pct_start", type=float, default=0.3, help="pct_start")
+    parser.add_argument("--patch_len", type=int, default=12, help="path length")
+    parser.add_argument("--stride", type=int, default=12, help="stride")
 
     # optimization
-    parser.add_argument('--num_workers', type=int, default=5, help='data loader num workers')
-    parser.add_argument('--itr', type=int, default=1, help='experiments times')
-    parser.add_argument('--train_epochs', type=int, default=10, help='train epochs')
-    parser.add_argument('--batch_size', type=int, default=32, help='batch size of train input data')
-    parser.add_argument('--patience', type=int, default=3, help='early stopping patience')
-    parser.add_argument('--learning_rate', type=float, default=0.0001, help='optimizer learning rate')
-    parser.add_argument('--des', type=str, default='test', help='exp description')
-    parser.add_argument('--loss', type=str, default='MSE', help='loss function')
-    parser.add_argument('--lradj', type=str, default='type1', help='adjust learning rate')
-    parser.add_argument('--use_amp', action='store_true', help='use automatic mixed precision training', default=False)
+    parser.add_argument(
+        "--num_workers", type=int, default=5, help="data loader num workers"
+    )
+    parser.add_argument("--itr", type=int, default=1, help="experiments times")
+    parser.add_argument("--train_epochs", type=int, default=10, help="train epochs")
+    parser.add_argument(
+        "--batch_size", type=int, default=32, help="batch size of train input data"
+    )
+    parser.add_argument("--patience", type=int, default=3, help="early stopping patience")
+    parser.add_argument(
+        "--learning_rate", type=float, default=0.0001, help="optimizer learning rate"
+    )
+    parser.add_argument("--des", type=str, default="test", help="exp description")
+    parser.add_argument("--loss", type=str, default="MSE", help="loss function")
+    parser.add_argument("--lradj", type=str, default="decay", help="adjust learning rate")
+    parser.add_argument(
+        "--use_amp",
+        action="store_true",
+        help="use automatic mixed precision training",
+        default=False,
+    )
 
     # GPU
-    parser.add_argument('--use_gpu', type=bool, default=True, help='use gpu')
-    parser.add_argument('--gpu', type=int, default=0, help='gpu')
-    parser.add_argument('--use_multi_gpu', action='store_true', help='use multiple gpus', default=False)
-    parser.add_argument('--devices', type=str, default='0', help='device ids of multile gpus')
+    parser.add_argument("--use_gpu", type=bool, default=True, help="use gpu")
+    parser.add_argument("--gpu", type=int, default=0, help="gpu")
+    parser.add_argument(
+        "--use_multi_gpu", action="store_true", help="use multiple gpus", default=False
+    )
+    parser.add_argument(
+        "--devices", type=str, default="0", help="device ids of multile gpus"
+    )
 
     # Pre-train
-    parser.add_argument('--lm', type=int, default=3, help='average masking length')
-    parser.add_argument('--positive_nums', type=int, default=3, help='masking series numbers')
-    parser.add_argument('--rbtp', type=int, default=1,
-                        help='0: rebuild the embedding of oral series; 1: rebuild oral series')
-    parser.add_argument('--temperature', type=float, default=0.2, help='temperature')
-    parser.add_argument('--masked_rule', type=str, default='geometric',
-                        help='geometric, random, masked tail, masked head')
-    parser.add_argument('--mask_rate', type=float, default=0.5, help='mask ratio')
-    parser.add_argument('--device', default='cuda:0', help='device')
-    parser.add_argument('--time_steps', default=1000,type=int, help='device')
-    # Pre-train
-
+    parser.add_argument(
+        "--time_steps", type=int, default=1000, help="time steps in diffusion"
+    )
     parser.add_argument(
         "--scheduler", type=str, default="cosine", help="scheduler in diffusion"
     )
 
     parser.add_argument("--lr_decay", type=float, default=0.5, help="learning rate decay")
-    parser.add_argument("--down_sampling_method", type=str, default='avg', help="down_sampling_method")
-    parser.add_argument('--down_sampling_window', type=int, default=1, help='down sampling window size')
-    parser.add_argument('--down_sampling_layers', type=int, default=2, help='num of down sampling layers')
-    parser.add_argument('--denoise_layers_num', type=int, default=3, help='num of denoise_layers_num')
-
     parser.add_argument(
         "--real_scheduler", type=str, default="cosine", help="real_scheduler in diffusion"
     )
@@ -1231,43 +1636,420 @@ def get_config():
         "--imag_scheduler", type=str, default="quad", help="imag_scheduler in diffusion"
     )
 
+    parser.add_argument("--down_sampling_method", type=str, default='avg', help="down_sampling_method")
+    parser.add_argument('--down_sampling_window', type=int, default=1, help='down sampling window size')
+    parser.add_argument('--down_sampling_layers', type=int, default=2, help='num of down sampling layers')
+
+    parser.add_argument('--GT_d_model', type=int, default=512)
+    parser.add_argument('--GT_d_ff', type=int, default=2048)
+    parser.add_argument('--token_len', type=int, default=48)
+    parser.add_argument('--GT_pooling_rate', type=list, default=[8, 4, 2, 1])
+    parser.add_argument('--GT_e_layers', type=int, default=3)
+    parser.add_argument('--depth', type=int, default=4)
+    parser.add_argument("--device", default='cuda:0', help="device")
+    parser.add_argument('--positive_nums', type=int, default=3, help='masking series numbers')
+    parser.add_argument('--rbtp', type=int, default=1,
+                        help='0: rebuild the embedding of oral series; 1: rebuild oral series')
+    parser.add_argument('--temperature', type=float, default=0.2, help='temperature')
+    parser.add_argument('--masked_rule', type=str, default='geometric',
+                        help='geometric, random, masked tail, masked head')
+    parser.add_argument('--mask_rate', type=float, default=0.5, help='mask ratio')
+    parser.add_argument('--seq_len', type=int, default=96, help='seq_len')
+    parser.add_argument('--denoise_layers_num', type=int, default=3, help='denoise_layers_num')
+    parser.add_argument('--inverse', action='store_true', help='inverse output data', default=False)
+
+    # loss
+    parser.add_argument('--del_orth_loss', type=int, help='del_orth_loss', default=0)
+    parser.add_argument('--del_season_freq_loss', type=int, help='del_season_freq_loss', default=0)
+    parser.add_argument('--del_smoothness_loss', type=int, help='del_smoothness_loss', default=0)
+    parser.add_argument('--del_freq_loss', type=int, help='del_freq_loss', default=0)
+    parser.add_argument('--del_recon_loss', type=int, help='del_recon_loss', default=0)
+
+    parser.add_argument('--log_var_freq', type=float, help='del_orth_loss', default=0.2)
+    parser.add_argument('--log_var_orth', type=float, help='del_season_freq_loss', default=6.0)
+    parser.add_argument('--log_var_smooth', type=float, help='del_smoothness_loss', default=1.0)
+    parser.add_argument('--log_var_season_freq', type=float, help='del_freq_loss', default=4.0)
+
+    parser.add_argument('--log_var_recon', type=float, help='del_freq_loss', default=0.1)
+    parser.add_argument('--use_defire_noise', type=int, help='use_defire_noise', default=0)
+    parser.add_argument('--use_trend_layer', type=int, help='use_trend_layer', default=1)
+    parser.add_argument('--use_positional_encoding', type=int, help='use_positional_encoding', default=1)
+    parser.add_argument('--use_sostoken', type=int, help='use_sostoken', default=1)
+    parser.add_argument('--use_init_loss', type=int, help='del_freq_loss', default=0)
+    parser.add_argument('--use_inner_encoder', type=int, help='use_inner_encoder', default=1)
+
+    parser.add_argument('--use_inner_new_decomp', type=int, help='use_inner_new_decomp', default=1)
+    parser.add_argument('--use_new_decomp', type=int, help='use_new_decomp', default=1)
+    parser.add_argument('--use_denoise', type=int, help='use_denoise', default=1)
+    parser.add_argument('--use_loss_compute', type=int, help='use_loss_compute', default=1)
+
+    parser.add_argument('--max_lag', type=int, help='max_lag', default=63)
+    parser.add_argument('--num_scales', type=int, help='num_scales', default=4)
+    parser.add_argument('--peak_threshold', type=float, help='peak_threshold', default=0.3)
+    parser.add_argument('--distance', type=int, help='distance', default=10)
+
+    parser.add_argument('--max_lag_inner', type=int, help='max_lag_inner', default=31)
+    parser.add_argument('--num_scales_inner', type=int, help='num_scales_inner', default=4)
+    parser.add_argument('--peak_threshold_inner', type=float, help='peak_threshold_inner', default=0.1)
+    parser.add_argument('--distance_inner', type=int, help='distance_inner', default=3)
+
     configs = parser.parse_args()
 
     return configs
 
 
+import os
+
+def get_checkpoint_path(base_dir, dataset_name, task_type):
+    """
+    根据数据集名称和任务类型自动选择对应路径
+
+    参数:
+        base_dir (str): 基础目录，例如 "F:\\模型的绘图等数据\\20250801MSCD改进版本的权重等\\outputs"
+        dataset_name (str): 数据集名称，例如 "Weather"
+        task_type (str): 任务类型，例如 "pretrain" 或 "finetune"
+
+    返回:
+        str: 匹配到的文件夹路径，如果未找到则返回 None
+    """
+    # 决定在哪个子目录查找
+    sub_dir = "pretrain_checkpoints" if task_type.lower() == "pretrain" else "checkpoints"
+    search_dir = os.path.join(base_dir, sub_dir)
+
+    if not os.path.exists(search_dir):
+        print(f"目录不存在: {search_dir}")
+        return None
+
+    # 遍历子目录寻找包含 dataset_name 的文件夹
+    candidates = [
+        os.path.join(search_dir, d) for d in os.listdir(search_dir)
+        if os.path.isdir(os.path.join(search_dir, d)) and dataset_name.lower() in d.lower()
+    ]
+
+    if not candidates:
+        print(f"未找到包含 '{dataset_name}' 的文件夹")
+        return None
+
+    # 如果有多个匹配，按修改时间排序（最新的放前面）
+    candidates.sort(key=lambda x: os.path.getmtime(x), reverse=True)
+    return candidates[0]  # 取最新的
+
+
 
 if __name__ == '__main__':
+    # 示例
+
+    # weights  = torch.randn(32,7,4,1)
+    #
+    # project_path = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
+    #
+    # path = project_path + os.sep + 'visiofigs' + os.sep + 'ETTh1' + os.sep
+    #
+    # # -------------------------------------------  绘制 heatmap for weight------------------
+    #
+    # i=1
+    # # ======== 获取权重 ========
+    # weights_mean = weights.squeeze(-1).mean(dim=0)
+    # weights_mean = weights_mean.unsqueeze(0)  # [C,K]
+    # plot_smooth_raw_heatmaps_smoothmore([weights_mean],sigma=3.0,           # 更大平滑
+    # smooth_repeat=1,     # 多次滤波
+    #                                      titles=["Scale Weights"], show_grid=False, path=path,
+    #                                     name=str(i) + '_weight_heatmap.png')
+
+
+    # pretrain
+    # folder_path = r"F:\模型的绘图等数据\20250801MSCD改进版本的权重等\outputs\pretrain_checkpoints\ETTh1_dln_1"
+    # folder_path = r"F:\模型的绘图等数据\20250801MSCD改进版本的权重等\outputs\pretrain_checkpoints\ETTm2_dln_3"
+
+    # folder_path = r"F:\模型的绘图等数据\20250801MSCD改进版本的权重等\outputs\pretrain_checkpoints\Electricity_dln_2"
+    # folder_path = r"F:\模型的绘图等数据\20250801MSCD改进版本的权重等\outputs\pretrain_checkpoints\ETTh2_dln_2"
+    # folder_path = r"F:\模型的绘图等数据\20250801MSCD改进版本的权重等\outputs\pretrain_checkpoints\Weather_dln_1"
+    #
+    # folder_path = r"F:\模型的绘图等数据\20250801MSCD改进版本的权重等\outputs\pretrain_checkpoints\ETTm1_dln_1"
+
+    # finetune
+    # folder_path = r"F:\模型的绘图等数据\20250801MSCD改进版本的权重等\outputs\checkpoints\finetune_TimeDART_ETTh1_M_il96_ll48_pl96_dm32_df64_nh16_el2_dl1_fc1_dp0.2_hdp0.1_ep10_bs16_lr0.0001_dln_1"
+    # folder_path = r"F:\模型的绘图等数据\20250801MSCD改进版本的权重等\outputs\checkpoints\finetune_TimeDART_ETTh2_M_il96_ll48_pl96_dm8_df32_nh8_el2_dl1_fc1_dp0.4_hdp0.1_ep10_bs16_lr0.0001_dln_2"
+    # folder_path = r"F:\模型的绘图等数据\20250801MSCD改进版本的权重等\outputs\checkpoints\finetune_TimeDART_ETTm1_M_il96_ll48_pl96_dm32_df64_nh8_el2_dl1_fc1_dp0.1_hdp0.0_ep10_bs64_lr0.0001_dln_1"
+    # folder_path = r"F:\模型的绘图等数据\20250801MSCD改进版本的权重等\outputs\checkpoints\finetune_TimeDART_ETTm2_M_il96_ll48_pl96_dm8_df16_nh8_el2_dl1_fc1_dp0.4_hdp0.1_ep10_bs64_lr0.0001_dln_3"
+    # folder_path = r"F:\模型的绘图等数据\20250801MSCD改进版本的权重等\outputs\checkpoints\finetune_TimeDART_Weather_M_il96_ll48_pl96_dm64_df64_nh8_el2_dl1_fc1_dp0.2_hdp0.1_ep10_bs16_lr0.0004_dln_1"
+    # folder_path = r"F:\模型的绘图等数据\20250801MSCD改进版本的权重等\outputs\checkpoints\finetune_TimeDART_Electricity_M_il96_ll48_pl96_dm128_df256_nh16_el2_dl1_fc1_dp0.2_hdp0.0_ep10_bs16_lr0.0004_dln_2"
+
+
+
+
+    # folder_path = r"F:\模型的绘图等数据\20250801MSCD改进版本的权重等\outputs\checkpoints\finetune_TimeDART_ETTh1_M_il96_ll48_pl96_dm32_df64_nh16_el2_dl1_fc1_dp0.2_hdp0.1_ep10_bs16_lr0.0001_dln_1"
+    # folder_path = r"E:\模型数据\TimeDART相关数据\TimeDART_version2_file\outputs\pretrain_checkpoints\Traffic"
+    # folder_path = r"E:\模型数据\TimeDART相关数据\TimeDART_version2_file\outputs\pretrain_checkpoints\ETTh1_dln_1"
+    # folder_path = r"E:\模型数据\TimeDART相关数据\TimeDART_version2_file\outputs\pretrain_checkpoints\ETTh1_dln_1"
+
+
+
+
+
+
     configs = get_config()
 
-    configs.task_name = 'pretrain'
 
-    configs.seq_len = 336
-    configs.e_layers = 3
+
+    use_defire_noise = 0
+    use_inner_encoder = 0
+    use_positional_encoding = 1
+    use_sostoken = 1
+
+    use_loss_compute = 1
+    use_new_decomp = 1
+    use_denoise = 1
+    use_inner_new_decomp = 1
+
+    use_init_loss = 0
+
+    del_orth_loss = 0
+    del_season_freq_loss = 1
+    del_freq_loss = 0
+    del_smoothness_loss = 0
+    del_recon_loss = 0
+    # del_smoothness_loss=1
+    # del_recon_loss=1
+    # h1m1 01000
+
+    log_var_freq = 0.3
+    log_var_orth = 0.01
+    log_var_smooth = 0.0
+    log_var_season_freq = 0.05
+    log_var_recon = 0.0
+    denoise_layers_num=3
+
+
+
+    d_model = 32
+    n_heads = 16
+    configs.task_name = 'pretrain'
+    configs.root_path = 'ETT-small'
+    configs.data_path = 'ETTm2.csv'
+    configs.model_id = 'ETTm2'
+    configs.model = 'TimeDART'
+    configs.data = 'ETTm2'
+    configs.features = 'M'
+    configs.input_len = 96
+    configs.e_layers = 2
+    configs.d_layers = 1
     configs.enc_in = 7
     configs.dec_in = 7
     configs.c_out = 7
-    configs.n_heads = 16
-    configs.d_model = 32
-    configs.d_ff = 64
-    configs.positive_nums = 3
-    configs.mask_rate = 0.5
-    configs.learning_rate = 0.001
-    configs.batch_size = 16
-    configs.train_epochs = 5
-    configs.input_len = 336
-
-    configs.down_sampling_layers = 2
-    configs.down_sampling_window = 2
-
-    x= torch.randn(1,336,7)
-    x_mark_enc= torch.randn(16,336,4)
-    x_res= torch.randn(16,336,7)
+    configs.n_heads = 8
+    configs.d_model = 8
+    configs.d_ff = 16
+    configs.denoise_layers_num = denoise_layers_num
+    configs.patch_len = 2
+    configs.stride = 2
+    configs.head_dropout = 0.1
 
 
-    configs.device = x.device
+
+
+    configs.batch_size = 64
+    configs.lr_decay = 0.5
+    configs.lradj = 'step'
+    configs.time_steps = 1000
+    configs.scheduler = 'cosine'
+    configs.patience = 3
+    configs.learning_rate = 0.0001
+    configs.pct_start = 0.3
+
+
+
+
+
+
+
+
+
+    configs.del_orth_loss=del_orth_loss
+    configs.del_season_freq_loss=del_season_freq_loss
+    configs.del_smoothness_loss=del_smoothness_loss
+    configs.del_freq_loss=del_freq_loss
+    configs.del_recon_loss=del_recon_loss
+    configs.log_var_recon=log_var_recon
+    configs.log_var_freq=log_var_freq
+    configs.log_var_orth=log_var_orth
+    configs.log_var_smooth=log_var_smooth
+    configs.log_var_season_freq=log_var_season_freq
+    configs.use_init_loss=use_init_loss
+    configs.use_new_decomp=use_new_decomp
+    configs.use_loss_compute=use_loss_compute
+    configs.use_denoise=use_denoise
+    configs.use_inner_new_decomp=use_inner_new_decomp
+    configs.use_defire_noise=use_defire_noise
+    configs.use_positional_encoding=use_positional_encoding
+    configs.use_sostoken=use_sostoken
+    configs.use_inner_encoder=use_inner_encoder
+    configs.down_sampling_window=2
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    base_dir = r"F:\模型的绘图等数据\20250801MSCD改进版本的权重等\outputs"
+    dataset_name = configs.data
+    task_type = configs.task_name
+    path = get_checkpoint_path(base_dir, dataset_name, task_type)
+    print("匹配到的路径:", path)
+    folder_path = path
+    if os.path.isdir(folder_path):
+        # checkpoint_path = os.path.join(folder_path, 'checkpoint.pth')
+        ckpt_best = os.path.join(folder_path, 'ckpt_best.pth')
+        ckpt_default = os.path.join(folder_path, 'checkpoint.pth')
+        checkpoint_path = ckpt_best if os.path.exists(ckpt_best) else ckpt_default
+        if os.path.exists(checkpoint_path):
+            state_dict = torch.load(checkpoint_path)
+            # state_dictlist = state_dict['model_state_dict']
+            # pretrain
+            state_dictlist = state_dict
+
+
+
+
+
+    train_data, train_loader = data_provider(configs, flag="train")
+    vali_data, vali_loader = data_provider(configs, flag="val")
+
+    # exp = Exp_TimeDART(configs)  # set experiments
+    # train_data, train_loader = exp._get_data(flag="train")
+    # vali_data, vali_loader = exp._get_data(flag="val")
+    configs.device = 'cpu'
+
     model = Model(configs)
-    mask = torch.ones_like(x)
-    # # x_enc 64 336 7 ; x_mark_enc 16 336 4 ； batch_x 16 336 7  mask 64 336 7
-    c = model(x,x_mark_enc)
-    d = 'end'
+
+    # 处理多GPU训练保存的权重（如果有'module.'前缀）
+    # state_dict = {k.replace('module.', ''): v for k, v in state_dictlist.items()}  # 去除前缀
+    new_pth = model.state_dict()
+    public_dict = {}
+
+    for k, v in state_dictlist.items():
+        for kk in new_pth.keys():
+            if kk in k:
+                public_dict[kk] = v
+                break
+    new_pth.update(public_dict)
+    model.load_state_dict(new_pth)
+    # 加载权重到模型
+    # model.load_state_dict(state_dictlist)
+
+    # 设置为评估模式（固定Dropout和BatchNorm）
+    model.eval()
+    for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(
+            train_loader
+    ):
+        batch_x = batch_x.float().to(model.device)
+        batch_y = batch_y.float().to(model.device)
+        batch_x_mark = batch_x_mark.float().to(model.device)
+
+        # import torch
+        # import torch.nn.functional as F
+        # import matplotlib.pyplot as plt
+        #
+        # # ========== 1. 模拟数据 ==========
+        # B, L, C = 8, 128, 4  # Batch, Length, Channels
+        # torch.manual_seed(0)
+        # x = batch_x  # [B, L, C]
+        #
+        #
+        # # ========== 2. 自相关 + 峰值检测 ==========
+        # def find_peaks_torch(acf, height, distance=10, max_num=6):
+        #     peaks = torch.zeros_like(acf, dtype=torch.bool)
+        #     peaks[1:-1] = (acf[1:-1] > acf[:-2]) & (acf[1:-1] > acf[2:])
+        #     peaks &= (acf >= height)
+        #     candidate_indices = torch.where(peaks)[0]
+        #     if len(candidate_indices) == 0:
+        #         return torch.tensor([], device=acf.device)
+        #     peak_values = acf[candidate_indices]
+        #     sorted_indices = torch.argsort(peak_values, descending=True)
+        #     sorted_candidates = candidate_indices[sorted_indices]
+        #     selected = []
+        #     for idx in sorted_candidates:
+        #         if all(abs(idx - s) > distance for s in selected):
+        #             selected.append(idx)
+        #             if len(selected) >= max_num:
+        #                 break
+        #     return torch.tensor(selected, device=acf.device, dtype=torch.long)
+        #
+        #
+        # def calculate_acf_mean(data, max_lag=63):
+        #     x = data.permute(0, 2, 1).contiguous()
+        #     B, C, L = x.shape
+        #     max_lag = min(max_lag, L - 1)
+        #     x_mean = x.mean(dim=2, keepdim=True)
+        #     x_centered = x - x_mean
+        #     x_norm = x_centered / (x_centered.std(dim=2, keepdim=True) + 1e-8)
+        #     pad_size = L - 1
+        #     x_padded = F.pad(x_norm, (0, pad_size))
+        #     fft_x = torch.fft.rfft(x_padded, dim=2)
+        #     acf = torch.fft.irfft(fft_x * fft_x.conj(), dim=2)[..., :L]
+        #     acf = acf / (acf[..., :1] + 1e-8)
+        #     mean_acf = acf.mean(dim=(0, 1))
+        #     return mean_acf[:max_lag]
+        #
+        #
+        # mean_acf = calculate_acf_mean(x, max_lag=63)
+        # peaks = find_peaks_torch(mean_acf, height=0.3, distance=5, max_num=6)
+        #
+        # # ========== 3. 绘制 ACF + 峰值 ==========
+        # # ======== 绘图 ========
+        # if len(peaks) == 0:
+        #     continue
+        # plt.figure(figsize=(6, 4))
+        # plt.plot(mean_acf.numpy(), label="Mean ACF")
+        # plt.scatter(peaks.numpy(), mean_acf[peaks].numpy(), color='red', zorder=5, label="Detected Peaks")
+        # plt.xlabel("Lag")
+        # plt.ylabel("ACF")
+        # plt.title("Autocorrelation & Detected Peaks ")
+        # plt.legend()
+        # plt.tight_layout()
+        # plt.savefig('peaks.png')
+        #
+        # # ======== 绘制直方图 ========
+        # plt.figure(figsize=(6, 4))
+        # plt.hist(peaks.numpy(), bins=np.arange(0, 64, 2), color="gray", edgecolor="black")
+        # plt.title("Peak Lag Distribution")
+        # plt.xlabel("Lag (bin)")
+        # plt.ylabel("Count")
+        # plt.tight_layout()
+        # plt.savefig('Lag.png')
+
+
+
+
+
+
+
+
+
+
+
+
+
+        # batch_x_m = batch_x_m.float()
+
+        # batch_x= torch.randn(1,336,7)
+        # batch_y= torch.randn(16,336,4)
+        # x_res= torch.randn(16,336,7)
+
+
+        # configs.device = batch_x.device
+
+        # mask = torch.ones_like(x)
+        # # x_enc 64 336 7 ; x_mark_enc 16 336 4 ； batch_x 16 336 7  mask 64 336 7
+        c = model(batch_x,batch_y,i)
+        print(i)
+        d = 'end'

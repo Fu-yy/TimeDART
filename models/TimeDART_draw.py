@@ -875,7 +875,7 @@ import seaborn as sns
 import numpy as np
 from scipy.ndimage import gaussian_filter  # 用于平滑处理
 
-def plot_smooth_raw_heatmaps(tensors, smooth_method='gaussian', sigma=1.0, titles=None, layer_idx=0, name='name'):
+def plot_smooth_raw_heatmaps_old(tensors, smooth_method='gaussian', sigma=1.0, titles=None, layer_idx=0, name='name'):
     """
     绘制平滑版和原始版热图（分两个独立图像）
 
@@ -956,6 +956,7 @@ def plot_smooth_raw_heatmaps(tensors, smooth_method='gaussian', sigma=1.0, title
             # vmin=-1.0,  # 与平滑版本保持一致
             # vmax=1.0
         )
+
         cbar = heatmap.collections[0].colorbar
         cbar.ax.tick_params(labelsize=10)
         title = f"{titles[idx]} (Raw)" if titles else f"Tensor {idx + 1} (Raw)"
@@ -964,6 +965,212 @@ def plot_smooth_raw_heatmaps(tensors, smooth_method='gaussian', sigma=1.0, title
     plt.tight_layout()
     plt.savefig(name+'raw_heatmaps'+str(layer_idx)+'.png', bbox_inches='tight')
     plt.close()
+
+
+
+
+
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+import numpy as np
+from scipy.ndimage import gaussian_filter  # 用于平滑处理
+
+def plot_smooth_raw_heatmaps(tensors, smooth_method='gaussian', sigma=1.0, titles=None, layer_idx=0,path='', name='name'):
+    if not os.path.exists(path):
+        os.makedirs(path)
+
+
+    """
+    绘制平滑版和原始版热图（整体正方形）
+    参数：
+        tensors       : 包含PyTorch张量的列表
+        smooth_method : 平滑方法 ('gaussian' 或 'none')
+        sigma         : 高斯滤波的标准差
+        titles        : 可选，每个子图的标题列表
+    """
+    sns.set_style("white")  # 白色背景
+    plt.rcParams.update({
+        'font.family': 'serif',
+        'font.serif': ['Times New Roman'],
+        'font.size': 12,
+        'axes.labelsize': 12,
+        'axes.titlesize': 14,
+        'xtick.labelsize': 10,
+        'ytick.labelsize': 10,
+        'figure.dpi': 300
+    })
+
+    # ==================== 绘制平滑版本 ====================
+    plt.figure(figsize=(5 * len(tensors), 5))
+    for idx, tensor in enumerate(tensors):
+        arr = tensor[0, :, :].detach().cpu().numpy()
+
+        # 平滑处理
+        smoothed = gaussian_filter(arr, sigma=sigma) if smooth_method == 'gaussian' else arr
+
+        plt.subplot(1, len(tensors), idx + 1)
+        ax = sns.heatmap(
+            smoothed,
+            cmap='coolwarm',
+            annot=False,
+            cbar=True,
+            square=False,  # 不强制方格
+            xticklabels=False,
+            yticklabels=False,
+            cbar_kws={'label': 'Activation Value'},
+            linewidths=0.5,
+            linecolor='whitesmoke'
+        )
+        # 设置整体为正方形
+        h, w = arr.shape
+        ax.set_aspect(w / h)  # 关键：让整个热图是正方形
+
+        cbar = ax.collections[0].colorbar
+        cbar.ax.tick_params(labelsize=10)
+        title = f"{titles[idx]} (Smoothed σ={sigma})" if titles else f"Tensor {idx + 1} (Smoothed)"
+        plt.title(title, fontweight='bold', pad=20)
+
+    plt.tight_layout()
+    plt.savefig(path + name + 'smoothed_heatmaps' + str(layer_idx) + '.png', bbox_inches='tight')
+    plt.close()
+
+    # ==================== 绘制原始版本 ====================
+    plt.figure(figsize=(5 * len(tensors), 5))
+    for idx, tensor in enumerate(tensors):
+        arr = tensor[0, :, :].detach().cpu().numpy()
+
+        plt.subplot(1, len(tensors), idx + 1)
+        ax = sns.heatmap(
+            arr,
+            cmap='plasma',
+            annot=False,
+            cbar=True,
+            square=False,
+            xticklabels=False,
+            yticklabels=False,
+            cbar_kws={'label': 'Activation Value'},
+            linewidths=0.5,
+            linecolor='lightgray'
+        )
+        # 设置整体为正方形
+        h, w = arr.shape
+        ax.set_aspect(w / h)
+
+        cbar = ax.collections[0].colorbar
+        cbar.ax.tick_params(labelsize=10)
+        title = f"{titles[idx]} (Raw)" if titles else f"Tensor {idx + 1} (Raw)"
+        plt.title(title, fontweight='bold', pad=20)
+
+    plt.tight_layout()
+    plt.savefig(path + name + 'raw_heatmaps' + str(layer_idx) + '.png', bbox_inches='tight')
+    plt.close()
+
+
+def plot_smooth_raw_heatmaps_smoothmore(
+        tensors,
+        smooth_method='gaussian',
+        sigma=1.0,
+        smooth_repeat=1,       # 平滑迭代次数
+        show_grid=True,        # 是否显示小格子
+        titles=None,
+        layer_idx=0,
+        path='',
+        name='name'):
+    import os
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    import numpy as np
+    from scipy.ndimage import gaussian_filter
+
+    if not os.path.exists(path):
+        os.makedirs(path)
+
+    sns.set_style("white")
+    # 全局字体调大
+    plt.rcParams.update({
+        'font.family': 'serif',
+        'font.serif': ['Times New Roman'],
+        'font.size': 18,           # 基础字号
+        'axes.labelsize': 18,
+        'axes.titlesize': 20,
+        'xtick.labelsize': 16,
+        'ytick.labelsize': 16,
+        'legend.fontsize': 16,
+        'figure.dpi': 300
+    })
+
+    grid_linewidth = 0.5 if show_grid else 0
+    grid_color = 'whitesmoke' if show_grid else None
+
+    # ==================== 平滑版本 ====================
+    plt.figure(figsize=(6 * len(tensors), 6))
+    for idx, tensor in enumerate(tensors):
+        arr = tensor[0, :, :].detach().cpu().numpy()
+
+        smoothed = arr.copy()
+        if smooth_method == 'gaussian':
+            for _ in range(smooth_repeat):  # 多次滤波让更平滑
+                smoothed = gaussian_filter(smoothed, sigma=sigma)
+
+        plt.subplot(1, len(tensors), idx + 1)
+        ax = sns.heatmap(
+            smoothed,
+            cmap='coolwarm',
+            annot=False,
+            cbar=True,
+            square=False,
+            xticklabels=False,
+            yticklabels=False,
+            cbar_kws={'label': 'Activation Value'},
+            linewidths=grid_linewidth,
+            linecolor=grid_color
+        )
+        h, w = arr.shape
+        ax.set_aspect(w / h)
+        cbar = ax.collections[0].colorbar
+        cbar.ax.tick_params(labelsize=16)  # 色条刻度字体
+        title = f"{titles[idx]} (Smoothed σ={sigma})" if titles else f"Tensor {idx + 1} (Smoothed)"
+        plt.title(title, fontweight='bold', fontsize=20, pad=20)  # 标题更大
+
+    plt.tight_layout()
+    plt.savefig(path + name + 'smoothed_heatmaps' + str(layer_idx) + '.png', bbox_inches='tight')
+    plt.close()
+
+    # ==================== 原始版本 ====================
+    plt.figure(figsize=(6 * len(tensors), 6))
+    for idx, tensor in enumerate(tensors):
+        arr = tensor[0, :, :].detach().cpu().numpy()
+
+        plt.subplot(1, len(tensors), idx + 1)
+        ax = sns.heatmap(
+            arr,
+            cmap='plasma',
+            annot=False,
+            cbar=True,
+            square=False,
+            xticklabels=False,
+            yticklabels=False,
+            cbar_kws={'label': 'Activation Value'},
+            linewidths=grid_linewidth,
+            linecolor=grid_color
+        )
+        h, w = arr.shape
+        ax.set_aspect(w / h)
+        cbar = ax.collections[0].colorbar
+        cbar.ax.tick_params(labelsize=16)
+        title = f"{titles[idx]} (Raw)" if titles else f"Tensor {idx + 1} (Raw)"
+        plt.title(title, fontweight='bold', fontsize=20, pad=20)
+
+    plt.tight_layout()
+    plt.savefig(path + name + 'raw_heatmaps' + str(layer_idx) + '.png', bbox_inches='tight')
+    plt.close()
+
+
+
+
+
+
 # def plot_smooth_raw_heatmaps(tensors, smooth_method='gaussian', sigma=1.0, titles=None,layer_idx=0,name='name'):
 #     """
 #     绘制平滑版和原始版热图（分两个独立图像）
@@ -1013,13 +1220,15 @@ def plot_smooth_raw_heatmaps(tensors, smooth_method='gaussian', sigma=1.0, title
 #
 
 
-def plot_line_charts(tensors, titles=None,layer_idx=0,name='0.jpg'):
+def plot_line_charts(tensors, titles=None,layer_idx=0,path='',name='0.jpg'):
     """
     绘制多个张量的折线图（横向排列）
     参数：
         tensors : 包含PyTorch张量的列表
         titles  : 可选，每个子图的标题列表
     """
+    if not os.path.exists(path):
+        os.makedirs(path)
     # 调整画布尺寸为宽幅横向布局
     plt.figure(figsize=(5 * len(tensors), 5))  # 宽度按子图数量扩展
 
@@ -1042,7 +1251,7 @@ def plot_line_charts(tensors, titles=None,layer_idx=0,name='0.jpg'):
 
     # 增强布局紧凑性
     plt.tight_layout(pad=2.0)
-    plt.savefig(name+str(layer_idx)+'.png', dpi=300, bbox_inches='tight')
+    plt.savefig(path + os.sep + name+str(layer_idx)+'.png', dpi=300, bbox_inches='tight')
     plt.close()  # 防止内存泄漏
 
 
@@ -1812,12 +2021,591 @@ def get_config():
 
     return configs
 
+def draw_alb_line():
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    # 模块
+    modules = ['TFOC', 'AASD', 'HCDM']
+
+    # 数据：有/无模块 (取完整模型和对应去掉的组合)
+    # ====== ETTh1 ======
+    mse_etth1_with = [0.42175, 0.42175, 0.42175]
+    mse_etth1_without = [0.4395, 0.44425, 0.433]
+    mae_etth1_with = [0.431, 0.431, 0.431]
+    mae_etth1_without = [0.435, 0.436, 0.432]
+
+    # ====== Weather ======
+    mse_weather_with = [0.24975, 0.24975, 0.24975]
+    mse_weather_without = [0.25725, 0.26325, 0.2555]
+    mae_weather_with = [0.2765, 0.2765, 0.2765]
+    mae_weather_without = [0.27825, 0.28275, 0.27825]
+
+    # 计算提升（Δ = 去掉 - 加上）
+    mse_etth1_delta = [(w - a) / w * 100 for w, a in zip(mse_etth1_without, mse_etth1_with)]
+    mae_etth1_delta = [(w - a) / w * 100 for w, a in zip(mae_etth1_without, mae_etth1_with)]
+    mse_weather_delta = [(w - a) / w * 100 for w, a in zip(mse_weather_without, mse_weather_with)]
+    mae_weather_delta = [(w - a) / w * 100 for w, a in zip(mae_weather_without, mae_weather_with)]
+    x = np.arange(len(modules))
+    width = 0.18
+
+    plt.rcParams.update({
+        'font.family': 'serif',
+        'font.size': 12,
+        'axes.linewidth': 1.2
+    })
+
+    # ------------------- 图1：彩色双指标 -------------------
+    fig, ax = plt.subplots(figsize=(9, 4))
+    rects1 = ax.bar(x - 1.5 * width, mse_etth1_delta, width, label='ETTh1-MSE', color='#1f77b4')
+    rects2 = ax.bar(x - 0.5 * width, mae_etth1_delta, width, label='ETTh1-MAE', color='#aec7e8')
+    rects3 = ax.bar(x + 0.5 * width, mse_weather_delta, width, label='Weather-MSE', color='#ff7f0e')
+    rects4 = ax.bar(x + 1.5 * width, mae_weather_delta, width, label='Weather-MAE', color='#ffbb78')
+
+    for rects in [rects1, rects2, rects3, rects4]:
+        for rect in rects:
+            height = rect.get_height()
+            ax.text(rect.get_x() + rect.get_width() / 2., height + 0.0005,
+                    f'{height:.3f}', ha='center', va='bottom', fontsize=9)
+
+    # ax.set_ylabel('Δ (Improvement)')
+    ax.set_ylabel('Δ Improvement (%)')
+
+    ax.set_title('Module Contribution on MSE & MAE')
+    ax.set_xticks(x)
+    ax.set_xticklabels(modules)
+    ax.legend(ncol=2, frameon=False)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    plt.tight_layout()
+    plt.savefig('MSCD_alb.png', dpi=300)
+
+
+def draw_layer_line():
+    import matplotlib.pyplot as plt
+
+    # 层数
+    layers = [1, 2, 3, 4]
+
+    # 数据集及数值
+    datasets = ['ETTh1', 'ETTh2', 'ETTm1', 'ETTm2', 'Exchange', 'Weather', 'Electricity']
+    mse_values = [
+        [0.42175, 0.44025, 0.43925, 0.4265],  # ETTh1
+        [0.387, 0.3825, 0.3835, 0.38275],  # ETTh2
+        [0.395, 0.39675, 0.3975, 0.397],  # ETTm1
+        [0.28475, 0.284, 0.284, 0.285],  # ETTm2
+        [0.36275, 0.3835, 0.38325, 0.382],  # Exchange
+        [0.24975, 0.25225, 0.2505, 0.25025],  # Weather
+        [0.195, 0.19475, 0.19575, 0.19575]  # Electricity
+    ]
+    mae_values = [
+        [0.43075, 0.437, 0.4405, 0.4355],  # ETTh1
+        [0.40725, 0.404, 0.405, 0.4045],  # ETTh2
+        [0.40125, 0.403, 0.40275, 0.403],  # ETTm1
+        [0.334, 0.33225, 0.331, 0.3315],  # ETTm2
+        [0.40625, 0.41675, 0.4175, 0.4165],  # Exchange
+        [0.2765, 0.279, 0.27775, 0.27775],  # Weather
+        [0.28, 0.28, 0.28025, 0.2805]  # Electricity
+    ]
+
+    plt.rcParams.update({
+        'font.family': 'serif',
+        'font.size': 12,
+        'axes.linewidth': 1.2
+    })
+
+    for i, data in enumerate(datasets):
+        plt.figure(figsize=(6, 4))
+        plt.plot(layers, mse_values[i], marker='o', color='#1f77b4', label='MSE')
+        plt.plot(layers, mae_values[i], marker='s', color='#ff7f0e', label='MAE')
+        plt.xticks(layers)
+        plt.xlabel('Decoder Layers')
+        plt.ylabel('Error')
+        plt.title(f'{data}: Effect of Decoder Layers on MSE & MAE')
+        plt.grid(alpha=0.3)
+        plt.legend(frameon=False)
+        plt.tight_layout()
+        plt.savefig(f'HCDM_layers_{data}.png', dpi=300)
+        plt.close()
+
+def draw_layer_line_new():
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    layers = [1, 2, 3, 4]
+    datasets = ['ETTh1', 'ETTh2', 'ETTm1', 'ETTm2', 'Exchange', 'Weather', 'Electricity']
+    mse_values = [
+        [0.42175, 0.44025, 0.43925, 0.4265],
+        [0.387, 0.3825, 0.3835, 0.38275],
+        [0.395, 0.39675, 0.3975, 0.397],
+        [0.28475, 0.284, 0.284, 0.285],
+        [0.36275, 0.3835, 0.38325, 0.382],
+        [0.24975, 0.25225, 0.2505, 0.25025],
+        [0.195, 0.19475, 0.19575, 0.19575]
+    ]
+    mae_values = [
+        [0.43075, 0.437, 0.4405, 0.4355],
+        [0.40725, 0.404, 0.405, 0.4045],
+        [0.40125, 0.403, 0.40275, 0.403],
+        [0.334, 0.33225, 0.331, 0.3315],
+        [0.40625, 0.41675, 0.4175, 0.4165],
+        [0.2765, 0.279, 0.27775, 0.27775],
+        [0.28, 0.28, 0.28025, 0.2805]
+    ]
+
+    plt.rcParams.update({
+        'font.family': 'serif',
+        'font.size': 12,
+        'axes.linewidth': 1.2
+    })
+
+    for i, data in enumerate(datasets):
+        plt.figure(figsize=(6, 4))
+        plt.plot(layers, mse_values[i], marker='o', color='#1f77b4', label='MSE')
+        plt.plot(layers, mae_values[i], marker='s', color='#ff7f0e', label='MAE')
+
+        # ===== 标记 MSE & MAE 最低点 =====
+        for values, color, label in zip([mse_values[i], mae_values[i]], ['#1f77b4', '#ff7f0e'], ['MSE', 'MAE']):
+            min_idx = np.argmin(values)
+            y = values[min_idx]
+            plt.plot(layers[min_idx], y, 'p', color='red', markersize=10, zorder=5)
+            # 动态调整文本位置：如果太靠近0，文字放上方
+            offset = 0.005 if y > 0.3 else -0.005
+            va = 'bottom' if y > 0.3 else 'top'
+            # plt.text(layers[min_idx], y + offset, f'{y:.3f}',
+            #          ha='center', va=va, fontsize=9, color='red')
+
+        plt.xticks(layers)
+        plt.xlabel('Decoder Layers')
+        plt.title(f'{data}: Effect of Decoder Layers on MSE & MAE')
+        plt.grid(alpha=0.3)
+        plt.legend(frameon=False)
+        plt.tight_layout()
+        plt.savefig(f'HCDM_layers_{data}.png', dpi=300)
+        plt.close()
+
+def draw_alb_facet_bar():
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    modules = ['TFOC', 'AASD', 'HCDM']
+    mse_etth1_delta = [4.04, 5.08, 2.58]
+    mae_etth1_delta = [0.92, 1.15, 0.23]
+    mse_weather_delta = [2.92, 5.11, 2.25]
+    mae_weather_delta = [0.63, 2.21, 0.63]
+
+    x = np.arange(len(modules))
+    width = 0.35
+    datasets = ['ETTh1', 'Weather']
+    mse_data = [mse_etth1_delta, mse_weather_delta]
+    mae_data = [mae_etth1_delta, mae_weather_delta]
+    colors = ['#1f77b4', '#ff7f0e']
+
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4), sharey=True)
+    for i, ax in enumerate(axes):
+        ax.bar(x - width/2, mse_data[i], width, label='MSE', color=colors[0])
+        ax.bar(x + width/2, mae_data[i], width, label='MAE', color=colors[1])
+        ax.set_xticks(x)
+        ax.set_xticklabels(modules)
+        ax.set_title(datasets[i])
+        if i == 0:
+            ax.set_ylabel('Δ Improvement (%)')
+        ax.legend(frameon=False)
+        ax.grid(alpha=0.3)
+
+    plt.suptitle('Module Contribution on MSE & MAE')
+    plt.tight_layout()
+    plt.savefig('alb_facet_bar.png', dpi=300)
+    plt.show()
+def draw_alb_line_with_min():
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    modules = ['TFOC', 'AASD', 'HCDM']
+    x = np.arange(len(modules))
+    mse_etth1_delta = [4.04, 5.08, 2.58]
+    mae_etth1_delta = [0.92, 1.15, 0.23]
+    mse_weather_delta = [2.92, 5.11, 2.25]
+    mae_weather_delta = [0.63, 2.21, 0.63]
+
+    plt.figure(figsize=(8, 5))
+    for data, color, label in zip(
+        [mse_etth1_delta, mae_etth1_delta, mse_weather_delta, mae_weather_delta],
+        ['#1f77b4', '#aec7e8', '#ff7f0e', '#ffbb78'],
+        ['ETTh1-MSE', 'ETTh1-MAE', 'Weather-MSE', 'Weather-MAE']
+    ):
+        plt.plot(x, data, marker='o', label=label, color=color)
+        min_idx = np.argmin(data)
+        plt.scatter(min_idx, data[min_idx], color='red', zorder=5)
+        plt.text(min_idx, data[min_idx]+0.2, f'{data[min_idx]:.2f}', ha='center', color='red', fontsize=9)
+
+    plt.xticks(x, modules)
+    plt.ylabel('Δ Improvement (%)')
+    plt.title('Module Contribution (Line)')
+    plt.grid(alpha=0.3)
+    plt.legend(frameon=False)
+    plt.tight_layout()
+    plt.savefig('alb_line_min.png', dpi=300)
+    plt.show()
+def draw_alb_radar():
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    modules = ['TFOC', 'AASD', 'HCDM']
+    mse_etth1_delta = [4.04, 5.08, 2.58]
+    mae_etth1_delta = [0.92, 1.15, 0.23]
+    mse_weather_delta = [2.92, 5.11, 2.25]
+    mae_weather_delta = [0.63, 2.21, 0.63]
+
+    labels = np.array(modules)
+    angles = np.linspace(0, 2*np.pi, len(labels), endpoint=False).tolist()
+    angles += angles[:1]  # 闭合
+
+    def extend(data):
+        return data + data[:1]
+
+    fig = plt.figure(figsize=(6, 6))
+    ax = plt.subplot(111, polar=True)
+    for data, color, label in zip(
+        [mse_etth1_delta, mae_etth1_delta, mse_weather_delta, mae_weather_delta],
+        ['#1f77b4', '#aec7e8', '#ff7f0e', '#ffbb78'],
+        ['ETTh1-MSE', 'ETTh1-MAE', 'Weather-MSE', 'Weather-MAE']
+    ):
+        ax.plot(angles, extend(data), color=color, linewidth=2, label=label)
+        ax.fill(angles, extend(data), color=color, alpha=0.25)
+
+    ax.set_xticks(angles[:-1])
+    ax.set_xticklabels(labels)
+    ax.set_title('Module Contribution Radar')
+    ax.legend(loc='upper right', bbox_to_anchor=(1.2, 1.1))
+    plt.tight_layout()
+    plt.savefig('alb_radar.png', dpi=300)
+    plt.show()
+def draw_alb_stacked_bar():
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    modules = ['TFOC', 'AASD', 'HCDM']
+    x = np.arange(len(modules))
+    mse_etth1_delta = [4.04, 5.08, 2.58]
+    mae_etth1_delta = [0.92, 1.15, 0.23]
+    mse_weather_delta = [2.92, 5.11, 2.25]
+    mae_weather_delta = [0.63, 2.21, 0.63]
+
+    total_etth1 = [m + a for m, a in zip(mse_etth1_delta, mae_etth1_delta)]
+    total_weather = [m + a for m, a in zip(mse_weather_delta, mae_weather_delta)]
+
+    width = 0.35
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.bar(x - width/2, mse_etth1_delta, width, label='ETTh1-MSE', color='#1f77b4')
+    ax.bar(x - width/2, mae_etth1_delta, width, bottom=mse_etth1_delta, label='ETTh1-MAE', color='#aec7e8')
+    ax.bar(x + width/2, mse_weather_delta, width, label='Weather-MSE', color='#ff7f0e')
+    ax.bar(x + width/2, mae_weather_delta, width, bottom=mse_weather_delta, label='Weather-MAE', color='#ffbb78')
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(modules)
+    ax.set_ylabel('Δ Improvement (%)')
+    ax.set_title('Stacked Module Contribution')
+    ax.legend(frameon=False, ncol=2)
+    plt.tight_layout()
+    plt.savefig('alb_stacked_bar.png', dpi=300)
+    plt.show()
+def draw_alb_line_annotated():
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    modules = ['TFOC', 'AASD', 'HCDM']
+    x = np.arange(len(modules))
+    mse_etth1_delta = [4.04, 5.08, 2.58]
+    mae_etth1_delta = [0.92, 1.15, 0.23]
+    mse_weather_delta = [2.92, 5.11, 2.25]
+    mae_weather_delta = [0.63, 2.21, 0.63]
+
+    plt.figure(figsize=(8, 5))
+    for data, color, label in zip(
+        [mse_etth1_delta, mae_etth1_delta, mse_weather_delta, mae_weather_delta],
+        ['#1f77b4', '#aec7e8', '#ff7f0e', '#ffbb78'],
+        ['ETTh1-MSE', 'ETTh1-MAE', 'Weather-MSE', 'Weather-MAE']
+    ):
+        plt.plot(x, data, marker='o', label=label, color=color, linewidth=2)
+        # ===== 标记最小值 + 箭头注释 =====
+        min_idx = np.argmin(data)
+        plt.scatter(min_idx, data[min_idx], color='red', s=50, zorder=5)
+        plt.annotate(f'Min: {data[min_idx]:.2f}%',
+                     xy=(min_idx, data[min_idx]), xycoords='data',
+                     xytext=(min_idx, data[min_idx]+1.5),
+                     arrowprops=dict(facecolor='red', shrink=0.05, width=1.2, headwidth=6),
+                     ha='center', fontsize=9, color='red')
+
+    plt.xticks(x, modules)
+    plt.ylabel('Δ Improvement (%)')
+    plt.title('Module Contribution (MSE & MAE)')
+    plt.grid(alpha=0.3)
+    plt.legend(frameon=False)
+    plt.tight_layout()
+    plt.savefig('alb_line_annotated.png', dpi=300)
+    plt.show()
+def draw_alb_facet_bar_annotated():
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    modules = ['TFOC', 'AASD', 'HCDM']
+    mse_etth1_delta = [4.04, 5.08, 2.58]
+    mae_etth1_delta = [0.92, 1.15, 0.23]
+    mse_weather_delta = [2.92, 5.11, 2.25]
+    mae_weather_delta = [0.63, 2.21, 0.63]
+
+    x = np.arange(len(modules))
+    width = 0.35
+    datasets = ['ETTh1', 'Weather']
+    mse_data = [mse_etth1_delta, mse_weather_delta]
+    mae_data = [mae_etth1_delta, mae_weather_delta]
+    colors = ['#1f77b4', '#ff7f0e']
+
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4), sharey=True)
+    for i, ax in enumerate(axes):
+        bars1 = ax.bar(x - width/2, mse_data[i], width, label='MSE', color=colors[0])
+        bars2 = ax.bar(x + width/2, mae_data[i], width, label='MAE', color=colors[1])
+        for bars in [bars1, bars2]:
+            for rect in bars:
+                height = rect.get_height()
+                ax.text(rect.get_x() + rect.get_width()/2., height + 0.1,
+                        f'{height:.2f}', ha='center', va='bottom', fontsize=9)
+        ax.set_xticks(x)
+        ax.set_xticklabels(modules)
+        ax.set_title(datasets[i])
+        if i == 0:
+            ax.set_ylabel('Δ Improvement (%)')
+        ax.legend(frameon=False)
+        ax.grid(alpha=0.3)
+
+    plt.suptitle('Module Contribution on MSE & MAE')
+    plt.tight_layout()
+    plt.savefig('alb_facet_bar_annotated.png', dpi=300)
+    plt.show()
+def draw_alb_radar_annotated():
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    modules = ['TFOC', 'AASD', 'HCDM']
+    mse_etth1_delta = [4.04, 5.08, 2.58]
+    mae_etth1_delta = [0.92, 1.15, 0.23]
+    mse_weather_delta = [2.92, 5.11, 2.25]
+    mae_weather_delta = [0.63, 2.21, 0.63]
+
+    labels = np.array(modules)
+    angles = np.linspace(0, 2*np.pi, len(labels), endpoint=False).tolist()
+    angles += angles[:1]  # 闭合
+
+    def extend(data):
+        return data + data[:1]
+
+    fig = plt.figure(figsize=(6, 6))
+    ax = plt.subplot(111, polar=True)
+    for data, color, label in zip(
+        [mse_etth1_delta, mae_etth1_delta, mse_weather_delta, mae_weather_delta],
+        ['#1f77b4', '#aec7e8', '#ff7f0e', '#ffbb78'],
+        ['ETTh1-MSE', 'ETTh1-MAE', 'Weather-MSE', 'Weather-MAE']
+    ):
+        vals = extend(data)
+        ax.plot(angles, vals, color=color, linewidth=2, label=label)
+        ax.fill(angles, vals, color=color, alpha=0.25)
+        # ===== 标注每个点数值 =====
+        for angle, val in zip(angles, vals):
+            ax.text(angle, val + 0.3, f'{val:.2f}', ha='center', va='center', fontsize=8, color=color)
+
+    # ===== 高亮最大值（加红色星号） =====
+    combined = mse_etth1_delta + mae_etth1_delta + mse_weather_delta + mae_weather_delta
+    max_val = max(combined)
+    max_idx = combined.index(max_val) % len(modules)
+    ax.plot(angles[max_idx], max_val, 'p', color='red', markersize=10, zorder=5)
+
+    ax.set_xticks(angles[:-1])
+    ax.set_xticklabels(labels)
+    ax.set_title('Module Contribution Radar', fontsize=14)
+    ax.legend(loc='upper right', bbox_to_anchor=(1.2, 1.1))
+    plt.tight_layout()
+    plt.savefig('alb_radar_annotated.png', dpi=300)
+    plt.show()
+def draw_alb_stacked_bar_annotated():
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    modules = ['TFOC', 'AASD', 'HCDM']
+    x = np.arange(len(modules))
+    mse_etth1_delta = [4.04, 5.08, 2.58]
+    mae_etth1_delta = [0.92, 1.15, 0.23]
+    mse_weather_delta = [2.92, 5.11, 2.25]
+    mae_weather_delta = [0.63, 2.21, 0.63]
+
+    width = 0.35
+    fig, ax = plt.subplots(figsize=(9, 6))
+    bars1 = ax.bar(x - width/2, mse_etth1_delta, width, label='ETTh1-MSE', color='#1f77b4')
+    bars2 = ax.bar(x - width/2, mae_etth1_delta, width, bottom=mse_etth1_delta, label='ETTh1-MAE', color='#aec7e8')
+    bars3 = ax.bar(x + width/2, mse_weather_delta, width, label='Weather-MSE', color='#ff7f0e')
+    bars4 = ax.bar(x + width/2, mae_weather_delta, width, bottom=mse_weather_delta, label='Weather-MAE', color='#ffbb78')
+
+    # ===== 数值标注 =====
+    for bars in [bars1, bars2, bars3, bars4]:
+        for rect in bars:
+            height = rect.get_height() + rect.get_y()
+            ax.text(rect.get_x() + rect.get_width()/2., height + 0.1, f'{height:.2f}',
+                    ha='center', va='bottom', fontsize=12, fontweight='bold')
+
+    # ===== 突出总贡献最大的模块（加红框） =====
+    total_contrib = [m + a for m, a in zip(mse_etth1_delta, mae_etth1_delta)]
+    max_idx = np.argmax(total_contrib)
+    ax.add_patch(plt.Rectangle((x[max_idx]-width, 0), width*2, max(total_contrib)+1,
+                               fill=False, edgecolor='red', linewidth=2))
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(modules, fontsize=14, fontweight='bold')
+    ax.set_ylabel('Δ Improvement (%)', fontsize=14)
+    ax.set_title('Stacked Module Contribution', fontsize=18, pad=15)
+    ax.legend(frameon=False, ncol=2, fontsize=12)
+    plt.tight_layout()
+    plt.savefig('alb_stacked_bar_annotated_bigfont.png', dpi=300)
+    plt.show()
+
+def draw_alb_radar_annotated_v3():
+    import matplotlib.pyplot as plt
+    import matplotlib.patheffects as path_effects
+    import numpy as np
+
+    modules = ['TFOC', 'AASD', 'HCDM']
+    mse_etth1_delta = [4.04, 5.08, 2.58]
+    mae_etth1_delta = [0.92, 1.15, 0.23]
+    mse_weather_delta = [2.92, 5.11, 2.25]
+    mae_weather_delta = [0.63, 2.21, 0.63]
+
+    labels = np.array(modules)
+    angles = np.linspace(0, 2*np.pi, len(labels), endpoint=False).tolist()
+    angles += angles[:1]  # 闭合
+
+    def extend(data):
+        return data + data[:1]
+
+    colors = ['#1f77b4', '#d62728', '#2ca02c', '#9467bd']
+
+    fig = plt.figure(figsize=(8, 8))
+    ax = plt.subplot(111, polar=True)
+    for j, (data, color, label) in enumerate(zip(
+        [mse_etth1_delta, mae_etth1_delta, mse_weather_delta, mae_weather_delta],
+        colors,
+        ['ETTh1-MSE', 'ETTh1-MAE', 'Weather-MSE', 'Weather-MAE']
+    )):
+        vals = extend(data)
+        ax.plot(angles, vals, color=color, linewidth=3, label=label)
+        ax.fill(angles, vals, color=color, alpha=0.15)
+
+        # 数值标签（加动态偏移防重叠）
+        # for i, (angle, val) in enumerate(zip(angles, vals)):
+        #     offset = 0.3 + j * 0.15
+        #     ax.text(angle, val + offset, f'{val:.2f}',
+        #             ha='center', va='center',
+        #             fontsize=13, fontweight='bold', color=color,
+        #             path_effects=[path_effects.withStroke(linewidth=1.5, foreground="white")])
+
+    # 高亮最大值
+    combined = mse_etth1_delta + mae_etth1_delta + mse_weather_delta + mae_weather_delta
+    max_val = max(combined)
+    max_idx = combined.index(max_val) % len(modules)
+    ax.plot(angles[max_idx], max_val, 'p', color='red', markersize=14, zorder=5)
+
+    ax.set_xticks(angles[:-1])
+    ax.set_xticklabels(labels, fontsize=14, fontweight='bold')
+    ax.set_title('Module Contribution Radar', fontsize=18, pad=20)
+    ax.legend(loc='upper right', bbox_to_anchor=(1.2, 1.1), fontsize=12)
+    plt.tight_layout()
+    plt.savefig('alb_radar_annotated_v3_bigfont.png', dpi=300)
+    plt.show()
+
+
+def draw_mse_different_dataset():
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    # 定义数据
+    datasets = {
+        "h1": [[0.374, 0.418, 0.449, 0.446],
+               [0.374, 0.424, 0.452, 0.493],
+               [0.386, 0.441, 0.487, 0.503],
+               [0.385, 0.439, 0.480, 0.462],
+               [0.460, 0.512, 0.546, 0.544]],
+        "h2": [[0.299, 0.381, 0.420, 0.430],
+               [0.305, 0.388, 0.425, 0.434],
+               [0.297, 0.380, 0.428, 0.427],
+               [0.301, 0.378, 0.422, 0.427],
+               [0.308, 0.393, 0.427, 0.436]],
+        "m1": [[0.339, 0.374, 0.403, 0.464],
+               [0.343, 0.380, 0.410, 0.468],
+               [0.334, 0.377, 0.426, 0.491],
+               [0.336, 0.378, 0.411, 0.469],
+               [0.352, 0.390, 0.421, 0.462]],
+        "m2": [[0.180, 0.245, 0.306, 0.405],
+               [0.181, 0.245, 0.304, 0.405],
+               [0.180, 0.250, 0.311, 0.412],
+               [0.181, 0.247, 0.309, 0.406],
+               [0.183, 0.255, 0.309, 0.412]],
+        "wth": [[0.168, 0.215, 0.270, 0.346],
+                [0.170, 0.217, 0.271, 0.348],
+                [0.174, 0.221, 0.278, 0.358],
+                [0.191, 0.236, 0.289, 0.362],
+                [0.186, 0.234, 0.284, 0.356]],
+        "elec": [[0.168, 0.178, 0.196, 0.237],
+                 [0.177, 0.183, 0.199, 0.240],
+                 [0.148, 0.162, 0.178, 0.225],
+                 [0.198, 0.199, 0.212, 0.253],
+                 [0.190, 0.199, 0.217, 0.258]],
+    }
+
+    models = ["MSCD", "TimeDART", "iTransformer", "Time-FFM", "PatchTST"]
+    colors = ['red', 'blue', 'green', 'orange', 'purple']  # 每个模型颜色
+    markers = ['o', 's', '^', 'D', 'x']  # 每个模型的标记
+    x_labels = [96, 192, 336, 720]
+
+    # 绘制每个数据集一张图
+    for dataset, values in datasets.items():
+        plt.figure(figsize=(6, 4))
+        for i, model in enumerate(models):
+            linewidth = 2.5 if model == "MSCD" else 1.5  # MSCD加粗
+            markersize = 8 if model == "MSCD" else 6  # MSCD加大点
+            plt.plot(x_labels, values[i],
+                     label=model,
+                     color=colors[i],
+                     marker=markers[i],
+                     linewidth=linewidth,
+                     markersize=markersize)
+        plt.title(f'{dataset.upper()} - MSE vs Prediction Length', fontsize=14)
+        plt.xlabel('Prediction Length', fontsize=12)
+        plt.ylabel('MSE', fontsize=12)
+        plt.xticks(x_labels)
+        plt.grid(True, linestyle='--', alpha=0.5)
+        plt.legend(fontsize=10, loc='upper left')  # 你也可以改成 'lower center' 放在下方
+        plt.tight_layout()
+        plt.savefig(f'{dataset}_mse_comparison.png', dpi=300)
+        plt.show()
 
 
 if __name__ == '__main__':
+    # draw_mse_different_dataset()
+    draw_alb_radar_annotated_v3()
+    # draw_alb_radar_annotated()
+
+    draw_alb_stacked_bar_annotated()
+    # draw_alb_line_annotated()
+
+    # draw_alb_facet_bar_annotated()
+    # draw_alb_facet_bar()
+    # draw_alb_line_with_min()
+    # draw_alb_radar()
+    # draw_alb_stacked_bar()
+
+
     # data preparation
-
-
+    # draw_layer_line_new()
+    # draw_layer_line()
+    # draw_alb_line()
     folder_path = r"E:\模型数据\TimeDART相关数据\TimeDART_version2_file\outputs\checkpoints\finetune_TimeDART_ETTh1_M_il336_ll48_pl720_dm32_df64_nh16_el2_dl1_fc1_dp0.2_hdp0.1_ep10_bs16_lr0.0001_dln_1"
     folder_path = r"E:\模型数据\TimeDART相关数据\TimeDART_version2_file\outputs\checkpoints\finetune_TimeDART_Traffic_M_il336_ll48_pl96_dm64_df128_nh16_el3_dl1_fc1_dp0.2_hdp0.1_ep10_bs8_lr0.003_dln_7"
     # folder_path = r"E:\模型数据\TimeDART相关数据\TimeDART_version2_file\outputs\pretrain_checkpoints\Traffic"
