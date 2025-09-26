@@ -125,7 +125,7 @@ class Exp_TimeDART(Exp_Basic):
         if self.args.load_checkpoints:
             print("Loading ckpt: {}".format(self.args.load_checkpoints))
 
-            transfer_device = "cuda:1" if torch.cuda.is_available() else "cpu"
+            transfer_device = self.args.device if torch.cuda.is_available() else "cpu"
             model = transfer_weights(
                 self.args.load_checkpoints, model, device=transfer_device
             )
@@ -297,11 +297,11 @@ class Exp_TimeDART(Exp_Basic):
                 # diff_loss.requires_grad = True
             # diff_loss = model_criterion(pred_x, batch_x)
             elif self.args.model == 'TimeDART':
-                pred_x,freq_loss,orth_loss,smoothness,season_freq_loss,recon_loss = self.model(batch_x,batch_y,i)
+                # pred_x,freq_loss,orth_loss,smoothness,season_freq_loss,recon_loss = self.model(batch_x,batch_y,i)
                 # pred_x,freq_loss,orth_loss,smoothness,season_freq_loss = self.model(batch_x,batch_y,i)
-                # diff_loss = self.model(batch_x)
+                diff_loss,freq_loss,orth_loss,smoothness,season_freq_loss,recon_loss = self.model(batch_x,batch_y,i)
 
-                diff_loss = model_criterion(pred_x, batch_x)
+                # diff_loss = model_criterion(pred_x, batch_x)
 
 
 
@@ -453,9 +453,10 @@ class Exp_TimeDART(Exp_Basic):
                     diff_loss = self.model(batch_x)
                 # diff_loss = model_criterion(pred_x, batch_x)
                 elif self.args.model == 'TimeDART':
-                    pred_x, freq_loss, orth_loss, smoothness,season_freq_loss,recon_loss = self.model(batch_x, batch_x_m, i)
+                    # pred_x, freq_loss, orth_loss, smoothness,season_freq_loss,recon_loss = self.model(batch_x, batch_x_m, i)
                     # diff_loss = self.model(batch_x)
-                    diff_loss = model_criterion(pred_x, batch_x)
+                    # diff_loss = model_criterion(pred_x, batch_x)
+                    diff_loss, freq_loss, orth_loss, smoothness,season_freq_loss,recon_loss = self.model(batch_x, batch_x_m, i)
 
                 else:
                     pred_x = self.model(batch_x,batch_x_m)
@@ -677,7 +678,7 @@ class Exp_TimeDART(Exp_Basic):
         # save_hist(factor_item_hist, str(self.args.data) + str(self.args.task_name) + str(self.args.pred_len)+'trainfactor_item_hist.pkl')  # 保存原始数据
 
         best_model_path = path + "/" + "checkpoint.pth"
-        self.model.load_state_dict(torch.load(best_model_path, map_location="cuda:1"))
+        self.model.load_state_dict(torch.load(best_model_path, map_location=self.args.device))
 
         self.lr = model_scheduler.get_last_lr()[0]
 
