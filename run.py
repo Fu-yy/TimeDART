@@ -247,6 +247,22 @@ parser.add_argument('--peak_threshold_inner', type=float, help='peak_threshold_i
 parser.add_argument('--distance_inner', type=int, help='distance_inner', default=3)
 
 
+
+# 2025-09-25 17:24:26 两种模式
+parser.add_argument('--pretrain_mode', type=str , help='A or B', default='B')
+parser.add_argument('--freeze_decomp_in_pretrain', type=int , help='A or B', default=1)
+parser.add_argument('--mask_ratio', type=float , help='mask_ratio', default=0.5)
+parser.add_argument('--mask_block', type=int , help='mask_block', default=13)
+parser.add_argument('--use_t_embed', type=int , help='use_t_embed', default=1)
+parser.add_argument('--use_init_loss_pretrain', type=int , help='use_init_loss_pretrain', default=0)
+parser.add_argument('--use_init_loss_finetune', type=int , help='use_init_loss_finetune', default=1)
+parser.add_argument('--use_geo_mask', type=int , help='use_geo_mask', default=1)
+parser.add_argument('--use_film_in_ft', type=int , help='use_film_in_ft', default=0)
+parser.add_argument('--pretrained_backbone', type=int , help='pretrained_backbone', default=1)
+# parser.add_argument('--use_geo_mask', type=int , help='use_geo_mask', default=1)
+
+
+
 args = parser.parse_args()
 args.use_gpu = True if torch.cuda.is_available() and args.use_gpu else False
 a = torch.cuda.is_available()

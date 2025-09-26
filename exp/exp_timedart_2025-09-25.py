@@ -30,6 +30,98 @@ import pickle
 
 warnings.filterwarnings("ignore")
 
+@torch.no_grad()
+def calibrate_aux_weights_for_pretrain(model, loader, K=32, device='cuda'):
+    """
+    针对“预训练阶段要加的分解正则”的量级校准（例如在 x_hat 上的冻结分解）
+    """
+    model.eval()
+    sums = {"freq":0.0,"orth":0.0,"smooth":0.0,"season_freq":0.0,"recon":0.0}
+    n = 0
+    # 冻结分解器
+    decomp_params = []
+    for name, p in model.named_parameters():
+        if 'decomp_multi' in name or 'decomp_multi_learnable' in name:
+            decomp_params.append(p); p.requires_grad_(False)
+
+    for i, (bx, *_) in enumerate(loader):
+        if i >= K: break
+        bx = bx.float().to(device)
+        # 走一次预训练前向拿到重建（示意：B 版）
+        loss_or_eps = model.pretrain_B(bx, None)  # 这里你也可以返回 x_hat 方便统计
+        # 假设你在 pretrain_B 里临时把 x_hat 存在 model.last_x_hat（或直接改返回）
+        x_hat = model.last_x_hat  # [B,L,C]
+        # 在冻结分解器上统计
+        s_dec, t_dec, Lf, Lo, Ls, Lsf, Lrec = model.decomp_multi_learnable(x_hat)  # 只作为统计
+        sums["freq"]+=Lf.item(); sums["orth"]+=Lo.item(); sums["smooth"]+=Ls.item()
+        sums["season_freq"]+=Lsf.item(); sums["recon"]+=Lrec.item(); n+=1
+
+    for p in decomp_params: p.requires_grad_(True)
+    means = {k: max(v/max(1,n),1e-8) for k,v in sums.items()}
+    # 返回 log-variance 初值
+    import math
+    lg = lambda x: float(min(max(math.log(x), -6.0), 6.0))
+    return { "log_var_freq":lg(means["freq"]), "log_var_orth":lg(means["orth"]),
+             "log_var_smooth":lg(means["smooth"]), "log_var_season_freq":lg(means["season_freq"]),
+             "log_var_recon":lg(means["recon"]) }
+
+@torch.no_grad()
+def calibrate_aux_weights_for_finetune(model, loader, K=64, device='cuda', use_kendall=True,
+                          clamp=(-6.0, 6.0)):
+    """
+    在 K 个 mini-batches 上估计分解相关损失的典型量级，
+    用于初始化 log_var_*（Kendall）或返回标量权重。
+    要求：模型里有 decomp 模块；这一步不反传。
+    """
+    model.eval()
+    sums = {"freq": 0.0, "orth": 0.0, "smooth": 0.0, "season_freq": 0.0, "recon": 0.0}
+    n = 0
+
+    # 可选：先冻结分解，保证统计稳定
+    decomp_params = []
+    for name, p in model.named_parameters():
+        if 'decomp_multi' in name or 'decomp_multi_learnable' in name:
+            decomp_params.append(p)
+            p.requires_grad_(False)
+
+    for i, (bx, *_) in enumerate(loader):
+        if i >= K: break
+        bx = bx.float().to(device)
+        # 只做分解与正则项的前向统计；不要走你预训练的加噪/遮盖路径
+        # 用干净 x 得到 seasonal/trend 与对应正则（与你现有 forward 的返回对齐即可）
+        # 下面示例按你原 forward 的签名返回：
+        _yhat, Lf, Lo, Ls, Lsf, Lrec = model.forecast(bx, None)  # 或显式调用分解函数统计
+        sums["freq"] += float(Lf.item())
+        sums["orth"] += float(Lo.item())
+        sums["smooth"] += float(Ls.item())
+        sums["season_freq"] += float(Lsf.item())
+        sums["recon"] += float(Lrec.item())
+        n += 1
+
+    # 还原分解参数的 requires_grad
+    for p in decomp_params:
+        p.requires_grad_(True)
+
+    means = {k: max(v / max(1, n), 1e-8) for k, v in sums.items()}
+
+    if use_kendall:
+        # Kendall: s_i = log( L_i ) 作为初始；并 clamp 防爆
+        import math
+        def lg(x):
+            return float(min(max(math.log(x), clamp[0]), clamp[1]))
+
+        return {
+            "log_var_freq": lg(means["freq"]),
+            "log_var_orth": lg(means["orth"]),
+            "log_var_smooth": lg(means["smooth"]),
+            "log_var_season_freq": lg(means["season_freq"]),
+            "log_var_recon": lg(means["recon"]),
+        }
+    else:
+        # 返回固定系数（如使各项乘权后量级相近）
+        total = sum(means.values())
+        return {k: (total / (5 * v)) for k, v in means.items()}  # 简单反比归一
+
 
 class AdaptiveLossBalancer:
     def __init__(self, base_weights, momentum=0.9):
@@ -79,24 +171,7 @@ class Exp_TimeDART(Exp_Basic):
         super(Exp_TimeDART, self).__init__(args)
         self.writer = SummaryWriter(f"./outputs/logs")
         self.loss_balancer = AdaptiveLossBalancer(
-            # base_weights={
-            #     'diff': 1.0,
-            #     'freq': self.model.freq_weight,
-            #     'orth': self.model.orth_weight,
-            #     'smooth': self.model.smooth_weight,
-            #     'season_freq': self.model.season_freq_weight,
-            #     'recon': self.model.recon_weight,
-            #     'period': self.model.period_weight,
-            #     'reg': self.model.reg_weight
-            # },
-            # base_weights={
-            #     'diff': 1.0,
-            #     'freq': 0.3,
-            #     'orth': 0.01,
-            #     'smooth': 0,
-            #     'season_freq': 0.05,
-            #     'recon': 0,
-            # },
+
             base_weights={
                 'diff': 1.0,
                 'freq': self.args.log_var_freq,
@@ -105,16 +180,7 @@ class Exp_TimeDART(Exp_Basic):
                 'season_freq': self.args.log_var_season_freq,
                 'recon': self.args.log_var_recon,
             },
-            # base_weights={
-            #     'diff': 0.9,  # 保持主导，但稍下调
-            #     'freq': 0.6,  # 明显提高，强化全频约束
-            #     'orth': 0.03,  # 提高，使正交性生效
-            #     'smooth': 0.0,  # 若需平滑，可置小值；否则继续置0
-            #     'season_freq': 0.12,  # 增强季节成分学习
-            #     'recon': 0.0,  # 删除
-            #     'period': 0.03,  # 若保留，可小幅度调整；否则删除
-            #     'reg': 1e-4  # 启用模型参数正则
-            # },
+
             momentum=0.95
         )
         self.loss_names = ['diff', 'freq', 'orth', 'smooth', 'season_freq', 'recon']
@@ -125,7 +191,7 @@ class Exp_TimeDART(Exp_Basic):
         if self.args.load_checkpoints:
             print("Loading ckpt: {}".format(self.args.load_checkpoints))
 
-            transfer_device = "cuda:1" if torch.cuda.is_available() else "cpu"
+            transfer_device = "cuda:0" if torch.cuda.is_available() else "cpu"
             model = transfer_weights(
                 self.args.load_checkpoints, model, device=transfer_device
             )
@@ -246,7 +312,11 @@ class Exp_TimeDART(Exp_Basic):
 
     def get_layer_weight(self,layer_idx, total_layers):
         return max(0.5, 1.0 - 0.2 * (layer_idx / total_layers))
+
+
     def pretrain_one_epoch(self, train_loader, model_optim, model_scheduler):
+
+
         train_loss = []
         model_criterion = self._select_criterion()
         total_epoch = len(train_loader)
@@ -259,8 +329,15 @@ class Exp_TimeDART(Exp_Basic):
 
             self.model.init_adaptive_weights(simple_batch_x)
 
-
-
+        # 建议：预训练基线不做 init；若需要，做“多批次校准”
+        # if self.args.use_init_loss_pretrain == 1:
+        #     init = calibrate_aux_weights_for_pretrain(self.model, train_loader, K=64,
+        #                                  device=self.device)
+        #     self.model.log_var_freq.data = torch.tensor(init["log_var_freq"], device=self.device)
+        #     self.model.log_var_orth.data = torch.tensor(init["log_var_orth"], device=self.device)
+        #     self.model.log_var_smooth.data = torch.tensor(init["log_var_smooth"], device=self.device)
+        #     self.model.log_var_season_freq.data = torch.tensor(init["log_var_season_freq"], device=self.device)
+        #     self.model.log_var_recon.data = torch.tensor(init["log_var_recon"], device=self.device)
 
         # -------------------
 
@@ -297,11 +374,11 @@ class Exp_TimeDART(Exp_Basic):
                 # diff_loss.requires_grad = True
             # diff_loss = model_criterion(pred_x, batch_x)
             elif self.args.model == 'TimeDART':
-                pred_x,freq_loss,orth_loss,smoothness,season_freq_loss,recon_loss = self.model(batch_x,batch_y,i)
+                # pred_x,freq_loss,orth_loss,smoothness,season_freq_loss,recon_loss = self.model(batch_x,batch_y,i)
                 # pred_x,freq_loss,orth_loss,smoothness,season_freq_loss = self.model(batch_x,batch_y,i)
-                # diff_loss = self.model(batch_x)
+                diff_loss = self.model(batch_x,batch_y,i)
 
-                diff_loss = model_criterion(pred_x, batch_x)
+                # diff_loss = model_criterion(pred_x, batch_x)
 
 
 
@@ -316,26 +393,26 @@ class Exp_TimeDART(Exp_Basic):
 
 
 
-                loss_freq = 1 / (2 * self.model.log_var_freq) * freq_loss + 0.5 * torch.log(self.model.log_var_freq)
-
-                loss_orth = 1 / (2 * self.model.log_var_orth) * orth_loss + 0.5 * torch.log(self.model.log_var_orth)
-
-                loss_smooth = 1 / (
-                            2 * self.model.log_var_smooth) * smoothness + 0.5 * torch.log(self.model.log_var_smooth)
-                loss_season_freq = 1 / (2 *
-                    self.model.log_var_season_freq) * season_freq_loss + 0.5 * torch.log(self.model.log_var_season_freq)
-                loss_recon = 1 / (2 * self.model.log_var_recon) * recon_loss + 0.5 * torch.log(self.model.log_var_recon)
-
-                if self.args.del_orth_loss == 1:
-                    loss_orth = torch.tensor(0.0)  # 618
-                if self.args.del_smoothness_loss == 1:
-                    loss_smooth = torch.tensor(0.0)  # 0.0025
-                if self.args.del_season_freq_loss == 1:
-                    loss_season_freq = torch.tensor(0.0)  # 10.6285
-                if self.args.del_freq_loss == 1:
-                    loss_freq = torch.tensor(0.0)  # 2.3
-                if self.args.del_recon_loss == 1:
-                    loss_recon = torch.tensor(0.0)
+                # loss_freq = 1 / (2 * self.model.log_var_freq) * freq_loss + 0.5 * torch.log(self.model.log_var_freq)
+                #
+                # loss_orth = 1 / (2 * self.model.log_var_orth) * orth_loss + 0.5 * torch.log(self.model.log_var_orth)
+                #
+                # loss_smooth = 1 / (
+                #             2 * self.model.log_var_smooth) * smoothness + 0.5 * torch.log(self.model.log_var_smooth)
+                # loss_season_freq = 1 / (2 *
+                #     self.model.log_var_season_freq) * season_freq_loss + 0.5 * torch.log(self.model.log_var_season_freq)
+                # loss_recon = 1 / (2 * self.model.log_var_recon) * recon_loss + 0.5 * torch.log(self.model.log_var_recon)
+                #
+                # if self.args.del_orth_loss == 1:
+                #     loss_orth = torch.tensor(0.0)  # 618
+                # if self.args.del_smoothness_loss == 1:
+                #     loss_smooth = torch.tensor(0.0)  # 0.0025
+                # if self.args.del_season_freq_loss == 1:
+                #     loss_season_freq = torch.tensor(0.0)  # 10.6285
+                # if self.args.del_freq_loss == 1:
+                #     loss_freq = torch.tensor(0.0)  # 2.3
+                # if self.args.del_recon_loss == 1:
+                #     loss_recon = torch.tensor(0.0)
                 # loss_freq = 0.01 * freq_loss
                 # loss_orth = 0.1 * orth_loss
                 # loss_smooth = 0.1 * smoothness
@@ -348,25 +425,25 @@ class Exp_TimeDART(Exp_Basic):
                 #     'season_freq': season_freq_loss,
                 #     'recon': recon_loss,
                 # },
-                log_loss_dict = {  # 原始输出loss
-                    'diff': diff_loss,
-                    'freq': loss_freq,
-                    'orth': loss_orth,
-                    'smooth': loss_smooth,
-                    'season_freq': loss_season_freq,
-                    'recon': loss_recon,
-                },
-
-                model_loss = diff_loss
-                total_loss, adaptive_factors, factor_hist_item = self.loss_balancer(log_loss_dict[0],
-                                                                               device=self.device)
-                for name in self.loss_names:
-                    resourcce_loss_dict_hist[name].append(log_loss_dict[0][name].item())
-                    # adaptive_factors[name] 也是对应的权重
-                    factor_item_hist[name].append(factor_hist_item[name])
-                if self.args.use_loss_compute != 1:
-                    total_loss = model_loss
-                diff_loss = total_loss
+                # log_loss_dict = {  # 原始输出loss
+                #     'diff': diff_loss,
+                #     'freq': loss_freq,
+                #     'orth': loss_orth,
+                #     'smooth': loss_smooth,
+                #     'season_freq': loss_season_freq,
+                #     'recon': loss_recon,
+                # },
+                #
+                # model_loss = diff_loss
+                # total_loss, adaptive_factors, factor_hist_item = self.loss_balancer(log_loss_dict[0],
+                #                                                                device=self.device)
+                # for name in self.loss_names:
+                #     resourcce_loss_dict_hist[name].append(log_loss_dict[0][name].item())
+                #     # adaptive_factors[name] 也是对应的权重
+                #     factor_item_hist[name].append(factor_hist_item[name])
+                # if self.args.use_loss_compute != 1:
+                #     total_loss = model_loss
+                # diff_loss = total_loss
 
                 # -----
                 # 训练监控（前5个epoch打印详细信息）
@@ -384,8 +461,6 @@ class Exp_TimeDART(Exp_Basic):
         # ###############绘图
 
         # 解决中文显示问题
-        plt.rcParams['font.sans-serif'] = ['SimHei']  # 使用黑体
-        plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
 
         # 下采样函数：每隔step个点取一个点
         def downsample(data, step=10):
@@ -395,6 +470,8 @@ class Exp_TimeDART(Exp_Basic):
         def save_hist(hist_dict, filename):
             with open(filename, 'wb') as f:
                 pickle.dump(hist_dict, f)
+        # plt.rcParams['font.sans-serif'] = ['SimHei']  # 使用黑体
+        # plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
 
         # ---- 1. 各loss分量随step变化 ----
         # plt.figure(figsize=(20, 6))
@@ -453,9 +530,9 @@ class Exp_TimeDART(Exp_Basic):
                     diff_loss = self.model(batch_x)
                 # diff_loss = model_criterion(pred_x, batch_x)
                 elif self.args.model == 'TimeDART':
-                    pred_x, freq_loss, orth_loss, smoothness,season_freq_loss,recon_loss = self.model(batch_x, batch_x_m, i)
-                    # diff_loss = self.model(batch_x)
-                    diff_loss = model_criterion(pred_x, batch_x)
+                    # pred_x, freq_loss, orth_loss, smoothness,season_freq_loss,recon_loss = self.model(batch_x, batch_x_m, i)
+                    diff_loss = self.model(batch_x, batch_x_m, i)
+                    # diff_loss = model_criterion(pred_x, batch_x)
 
                 else:
                     pred_x = self.model(batch_x,batch_x_m)
@@ -503,12 +580,22 @@ class Exp_TimeDART(Exp_Basic):
             print("Current learning rate: {:.7f}".format(model_scheduler.get_last_lr()[0]))
 
             self.model.train()
+
             if self.args.use_init_loss == 1:
                 simple_batch_x, simple_batch_y, simple_batch_x_mark, simple_batch_y_mark = next(
                     iter(train_loader))  # 获取一个批次
                 simple_batch_x = simple_batch_x.float().to(self.device)
 
                 self.model.init_adaptive_weights(simple_batch_x)
+            # 建议：预训练基线不做 init；若需要，做“多批次校准”
+            # if self.args.use_init_loss_finetune == 1:
+            #     init = calibrate_aux_weights_for_finetune(self.model, train_loader, K=64,
+            #                                  device=self.device, use_kendall=True)
+            #     self.model.log_var_freq.data = torch.tensor(init["log_var_freq"], device=self.device)
+            #     self.model.log_var_orth.data = torch.tensor(init["log_var_orth"], device=self.device)
+            #     self.model.log_var_smooth.data = torch.tensor(init["log_var_smooth"], device=self.device)
+            #     self.model.log_var_season_freq.data = torch.tensor(init["log_var_season_freq"], device=self.device)
+            #     self.model.log_var_recon.data = torch.tensor(init["log_var_recon"], device=self.device)
 
             start_time = time.time()
 
@@ -523,13 +610,9 @@ class Exp_TimeDART(Exp_Basic):
                 batch_x_mark = batch_x_mark.float().to(self.device)
 
                 pred_x, freq_loss, orth_loss, smoothness,season_freq_loss ,recon_loss= self.model(batch_x,batch_x_mark)
+                loss_freq = torch.exp(-self.model.log_var_freq) * freq_loss + 0.5 * self.model.log_var_freq
 
-                # 自适应权重计算（不确定权重法）
-                # loss_freq = 1/(2*torch.exp(self.model.log_var_freq)) * freq_loss #+ 0.5*self.model.log_var_freq
-                # loss_orth = 1/(2*torch.exp(self.model.log_var_orth)) * orth_loss #+ 0.5*self.model.log_var_orth
-                # loss_smooth = 1/(2*torch.exp(self.model.log_var_smooth)) * smoothness #+ 0.5*self.model.log_var_smooth
-                # loss_season_freq = 1/(2*torch.exp(self.model.log_var_season_freq)) * season_freq_loss #+ 0.5*self.model.log_var_season_freq
-                # loss_recon = 1/(2*torch.exp(self.model.log_var_recon)) * recon_loss #+ 0.5*self.model.log_var_recon
+
 
                 loss_freq = 1 / (2 * self.model.log_var_freq) * freq_loss + 0.5*torch.log(self.model.log_var_freq)
                 loss_orth = 1 / (2 * self.model.log_var_orth) * orth_loss + 0.5*torch.log(self.model.log_var_orth)
@@ -677,7 +760,7 @@ class Exp_TimeDART(Exp_Basic):
         # save_hist(factor_item_hist, str(self.args.data) + str(self.args.task_name) + str(self.args.pred_len)+'trainfactor_item_hist.pkl')  # 保存原始数据
 
         best_model_path = path + "/" + "checkpoint.pth"
-        self.model.load_state_dict(torch.load(best_model_path, map_location="cuda:1"))
+        self.model.load_state_dict(torch.load(best_model_path, map_location="cuda:0"))
 
         self.lr = model_scheduler.get_last_lr()[0]
 
@@ -789,11 +872,26 @@ class Exp_TimeDART(Exp_Basic):
         formatted_time = now.strftime("%Y-%m-%d %H:%M:%S")
         # print("当前时间:", formatted_time)
         f.write(
-            "{0}->{1}, {2:.3f}, {3:.3f},{4},{5},{6},{7},log_var_orth={8},log_var_season_freq={9},log_var_freq={10},use_loss_compute={11},use_new_decomp={12},use_denoise={13},log_var_season_freq={14} \n".format(
+            "{0}->{1}, {2:.3f}, {3:.3f},{4},{5},{6},{7},log_var_orth={8},log_var_season_freq={9},log_var_freq={10},use_loss_compute={11},use_new_decomp={12},use_denoise={13},log_var_season_freq={14},{15}_{16}_{17}_{18}inner_{19}_{20}_{21}_{22} \n".format(
                 self.args.input_len, self.args.pred_len, mse, mae,formatted_time,self.args.d_model,
                 self.args.batch_size,self.args.n_heads,self.args.log_var_orth,self.args.log_var_season_freq,
                 self.args.log_var_freq,
-                self.args.use_loss_compute,self.args.use_new_decomp,self.args.use_denoise,self.args.use_inner_new_decomp))
+                self.args.use_loss_compute,self.args.use_new_decomp,self.args.use_denoise,self.args.use_inner_new_decomp,
+
+                self.args.max_lag,
+                self.args.num_scales,
+                self.args.peak_threshold,
+                self.args.distance,
+                self.args.max_lag_inner,
+                self.args.num_scales_inner,
+                self.args.peak_threshold_inner,
+                self.args.distance_inner,
+
+
+
+
+
+            ))
         f.close()
         np.save(folder_path+os.sep+ 'metrics.npy', np.array([mae, mse, rmse, mape, mspe]))
         np.save(folder_path+os.sep+'pred.npy', preds)
