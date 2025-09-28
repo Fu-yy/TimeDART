@@ -257,9 +257,11 @@ parser.add_argument('--use_t_embed', type=int , help='use_t_embed', default=1)
 parser.add_argument('--use_init_loss_pretrain', type=int , help='use_init_loss_pretrain', default=0)
 parser.add_argument('--use_init_loss_finetune', type=int , help='use_init_loss_finetune', default=1)
 parser.add_argument('--use_geo_mask', type=int , help='use_geo_mask', default=1)
-parser.add_argument('--use_film_in_ft', type=int , help='use_film_in_ft', default=0)
+parser.add_argument('--use_film_in_ft', type=int , help='use_film_in_ft', default=1)
 parser.add_argument('--pretrained_backbone', type=int , help='pretrained_backbone', default=1)
 parser.add_argument('--pretrain_noise', type=str , help='mask or tembed', default='mask')
+parser.add_argument('--predict_eps', type=int, help='predict_eps', default=1)
+parser.add_argument('--use_refine_in_ft', type=int, help='use_refine_in_ft', default=0)
 
 
 

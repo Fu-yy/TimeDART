@@ -316,15 +316,24 @@ class Exp_TimeDART(Exp_Basic):
 
 
 
-                loss_freq = 1 / (2 * self.model.log_var_freq) * freq_loss + 0.5 * torch.log(self.model.log_var_freq)
+                # loss_freq = 1 / (2 * self.model.log_var_freq) * freq_loss + 0.5 * torch.log(self.model.log_var_freq)
+                #
+                # loss_orth = 1 / (2 * self.model.log_var_orth) * orth_loss + 0.5 * torch.log(self.model.log_var_orth)
+                #
+                # loss_smooth = 1 / (
+                #             2 * self.model.log_var_smooth) * smoothness + 0.5 * torch.log(self.model.log_var_smooth)
+                # loss_season_freq = 1 / (2 *
+                #     self.model.log_var_season_freq) * season_freq_loss + 0.5 * torch.log(self.model.log_var_season_freq)
+                # loss_recon = 1 / (2 * self.model.log_var_recon) * recon_loss + 0.5 * torch.log(self.model.log_var_recon)
 
-                loss_orth = 1 / (2 * self.model.log_var_orth) * orth_loss + 0.5 * torch.log(self.model.log_var_orth)
 
-                loss_smooth = 1 / (
-                            2 * self.model.log_var_smooth) * smoothness + 0.5 * torch.log(self.model.log_var_smooth)
-                loss_season_freq = 1 / (2 *
-                    self.model.log_var_season_freq) * season_freq_loss + 0.5 * torch.log(self.model.log_var_season_freq)
-                loss_recon = 1 / (2 * self.model.log_var_recon) * recon_loss + 0.5 * torch.log(self.model.log_var_recon)
+                loss_freq = 1 / (2 * self.model.log_var_freq) * freq_loss + 0.5*torch.log(self.model.log_var_freq)
+                loss_orth = 1 / (2 * self.model.log_var_orth) * orth_loss + 0.5*torch.log(self.model.log_var_orth)
+                loss_smooth = 1 / (2 * self.model.log_var_smooth) * smoothness + 0.5*torch.log(self.model.log_var_smooth)
+                loss_season_freq = 1 / (2 * self.model.log_var_season_freq) * season_freq_loss + 0.5*torch.log(self.model.log_var_season_freq)
+                loss_recon = 1 / (2 * self.model.log_var_recon) * recon_loss + 0.5*torch.log(self.model.log_var_recon)
+
+
 
                 if self.args.del_orth_loss == 1:
                     loss_orth = torch.tensor(0.0)  # 618
@@ -366,7 +375,7 @@ class Exp_TimeDART(Exp_Basic):
                     factor_item_hist[name].append(factor_hist_item[name])
                 if self.args.use_loss_compute != 1:
                     total_loss = model_loss
-                diff_loss = total_loss
+                # diff_loss = total_loss
 
                 # -----
                 # 训练监控（前5个epoch打印详细信息）
@@ -532,11 +541,19 @@ class Exp_TimeDART(Exp_Basic):
                 # loss_season_freq = 1/(2*torch.exp(self.model.log_var_season_freq)) * season_freq_loss #+ 0.5*self.model.log_var_season_freq
                 # loss_recon = 1/(2*torch.exp(self.model.log_var_recon)) * recon_loss #+ 0.5*self.model.log_var_recon
 
+                # loss_freq = 1 / (2 * self.model.log_var_freq) * freq_loss + 0.5*torch.log(self.model.log_var_freq)
+                # loss_orth = 1 / (2 * self.model.log_var_orth) * orth_loss + 0.5*torch.log(self.model.log_var_orth)
+                # loss_smooth = 1 / (2 * self.model.log_var_smooth) * smoothness + 0.5*torch.log(self.model.log_var_smooth)
+                # loss_season_freq = 1 / (2 * self.model.log_var_season_freq) * season_freq_loss + 0.5*torch.log(self.model.log_var_season_freq)
+                # loss_recon = 1 / (2 * self.model.log_var_recon) * recon_loss + 0.5*torch.log(self.model.log_var_recon)
+
                 loss_freq = 1 / (2 * self.model.log_var_freq) * freq_loss + 0.5*torch.log(self.model.log_var_freq)
                 loss_orth = 1 / (2 * self.model.log_var_orth) * orth_loss + 0.5*torch.log(self.model.log_var_orth)
                 loss_smooth = 1 / (2 * self.model.log_var_smooth) * smoothness + 0.5*torch.log(self.model.log_var_smooth)
                 loss_season_freq = 1 / (2 * self.model.log_var_season_freq) * season_freq_loss + 0.5*torch.log(self.model.log_var_season_freq)
                 loss_recon = 1 / (2 * self.model.log_var_recon) * recon_loss + 0.5*torch.log(self.model.log_var_recon)
+
+
                 # loss_freq = 0.01 * freq_loss
                 # loss_orth = 0.1 * orth_loss
                 # loss_smooth = 0.1 * smoothness
@@ -556,26 +573,26 @@ class Exp_TimeDART(Exp_Basic):
                     loss_freq = torch.tensor(0.0)  # 2.3
                 if self.args.del_recon_loss == 1:
                     loss_recon = torch.tensor(0.0)
-                model_loss = loss
-                log_loss_dict = {  # 原始输出loss
-                    'diff': loss,
-                    'freq': loss_freq,
-                    'orth': loss_orth,
-                    'smooth': loss_smooth,
-                    'season_freq': loss_season_freq,
-                    'recon': loss_recon,
-                },
-
-                total_loss, adaptive_factors, factor_hist_item = self.loss_balancer(log_loss_dict[0],
-                                                                                    device=self.device)
-                for name in self.loss_names:
-                    resourcce_loss_dict_hist[name].append(log_loss_dict[0][name].item())
-                    # adaptive_factors[name] 也是对应的权重
-                    factor_item_hist[name].append(factor_hist_item[name])
-                if self.args.use_loss_compute != 1:
-                    total_loss = model_loss
-                loss = total_loss
-                # loss = loss + loss_freq + loss_orth + loss_smooth + loss_season_freq +loss_recon
+                # model_loss = loss
+                # log_loss_dict = {  # 原始输出loss
+                #     'diff': loss,
+                #     'freq': loss_freq,
+                #     'orth': loss_orth,
+                #     'smooth': loss_smooth,
+                #     'season_freq': loss_season_freq,
+                #     'recon': loss_recon,
+                # },
+                #
+                # total_loss, adaptive_factors, factor_hist_item = self.loss_balancer(log_loss_dict[0],
+                #                                                                     device=self.device)
+                # for name in self.loss_names:
+                #     resourcce_loss_dict_hist[name].append(log_loss_dict[0][name].item())
+                #     # adaptive_factors[name] 也是对应的权重
+                #     factor_item_hist[name].append(factor_hist_item[name])
+                # if self.args.use_loss_compute != 1:
+                #     total_loss = model_loss
+                # loss = total_loss
+                loss = loss + loss_freq + loss_orth + loss_smooth + loss_season_freq +loss_recon
 
 
 

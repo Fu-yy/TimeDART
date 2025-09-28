@@ -381,39 +381,76 @@ class StopLearnableMultiScaleDecomp(nn.Module):
         # seasonal_fft = torch.fft.rfft(seasonal, dim=2)  # [B,C, L//2+1]
         # season_freq_loss = -torch.mean(torch.abs(seasonal_fft[..., 5:]))  # 激励高频
         # recon_loss=torch.tensor(0.0)
+
+        def _band_abs_mean(spec, s, e):
+            # spec: [..., F]
+            s = int(s);
+            e = int(e)
+            if e <= s:
+                return spec.new_tensor(0.0)
+            band = spec[..., s:e]
+            # 最后一层兜底：把 NaN/Inf 变成 0
+            return torch.nan_to_num(band.abs().mean(), nan=0.0, posinf=0.0, neginf=0.0)
+
         # # === 科学修正的损失计算 ===
         # 1. 趋势项低频保护 + 高频抑制
+
         trend_fft = torch.fft.rfft(fused_trend, dim=-1)
-        # 频域处理 (动态比例)
+        seasonal_fft = torch.fft.rfft(seasonal, dim=-1)
         n_freq = trend_fft.size(-1)
-        k_protect = max(1, int(n_freq * 0.1))
-        k_mid = min(n_freq, int(n_freq * 0.8))
+
+        # 合理的边界（确保有至少1个频点可用）
+        k_protect = max(1, min(n_freq - 1, int(n_freq * 0.1)))
+        k_mid = max(k_protect + 1, min(n_freq - 1, int(n_freq * 0.8)))
+
+        # k_protect = max(1, int(n_freq * 0.1))
+        # k_mid = min(n_freq, int(n_freq * 0.8))
 
         # 趋势损失: 保护极低频，抑制其他
-        trend_freq_loss = torch.mean(torch.abs(trend_fft[..., k_protect:]))
+        # trend_freq_loss = torch.mean(torch.abs(trend_fft[..., k_protect:]))
 
 
 
         # 2. 季节项低频抑制（非高频激励！）
-        seasonal_fft = torch.fft.rfft(seasonal, dim=-1)
-        # 季节损失: 抑制极低频+高频，保护中频
-        season_freq_loss = torch.mean(torch.abs(seasonal_fft[..., :k_protect])) + \
-                           torch.mean(torch.abs(seasonal_fft[..., k_mid:]))
+        # seasonal_fft = torch.fft.rfft(seasonal, dim=-1)
+        # # 季节损失: 抑制极低频+高频，保护中频
+        # season_freq_loss = torch.mean(torch.abs(seasonal_fft[..., :k_protect])) + \
+        #                    torch.mean(torch.abs(seasonal_fft[..., k_mid:]))
+
+        trend_freq_loss = _band_abs_mean(trend_fft, k_protect, n_freq)  # 抑制保护区以外
+        season_low = _band_abs_mean(seasonal_fft, 0, k_protect)  # 季节项抑制极低频
+        season_high = _band_abs_mean(seasonal_fft, k_mid, n_freq)  # 以及极高频
+        season_freq_loss = season_low + season_high
 
         # 3. 正交约束（科学修正）
         # 正交约束 (双方中心化)
+        # centered_trend = fused_trend - fused_trend.mean(dim=-1, keepdim=True)
+        # centered_seasonal = seasonal - seasonal.mean(dim=-1, keepdim=True)
+        # orth_loss = torch.mean((centered_seasonal * centered_trend).sum(dim=-1) ** 2)
+        # 正交/平滑加兜底
         centered_trend = fused_trend - fused_trend.mean(dim=-1, keepdim=True)
         centered_seasonal = seasonal - seasonal.mean(dim=-1, keepdim=True)
-        orth_loss = torch.mean((centered_seasonal * centered_trend).sum(dim=-1) ** 2)
+        orth_loss = torch.nan_to_num(((centered_seasonal * centered_trend).sum(dim=-1) ** 2).mean(),
+                                     nan=0.0, posinf=0.0, neginf=0.0)
 
         # 平滑约束 (混合一阶/二阶)
-        smooth_loss = 0.0
+        # smooth_loss = 0.0
         if L >= 3:
-            first_diff = torch.mean(torch.diff(fused_trend, dim=-1) ** 2)
-            second_diff = torch.mean(torch.diff(fused_trend, n=2, dim=-1) ** 2)
-            smooth_loss = 0.6 * second_diff + 0.4 * first_diff
+            first_diff = torch.diff(fused_trend, dim=-1).pow(2).mean()
+            second_diff = torch.diff(fused_trend, n=2, dim=-1).pow(2).mean()
+            smooth_loss = 0.6 * first_diff + 0.4 * second_diff
+        else:
+            smooth_loss = fused_trend.new_tensor(0.0)
         # # 重构约束
-        recon_loss = F.l1_loss(x, seasonal + fused_trend)
+        recon_loss = torch.nn.functional.l1_loss(x, seasonal + fused_trend)
+        # 最终再统一 nan_to_num 一次（双保险）
+        trend_freq_loss = torch.nan_to_num(trend_freq_loss, nan=0.0, posinf=0.0, neginf=0.0)
+        season_freq_loss = torch.nan_to_num(season_freq_loss, nan=0.0, posinf=0.0, neginf=0.0)
+        smooth_loss = torch.nan_to_num(smooth_loss, nan=0.0, posinf=0.0, neginf=0.0)
+        orth_loss = torch.nan_to_num(orth_loss, nan=0.0, posinf=0.0, neginf=0.0)
+        recon_loss = torch.nan_to_num(recon_loss, nan=0.0, posinf=0.0, neginf=0.0)
+
+
         return seasonal.permute(0, 2, 1), fused_trend.permute(0, 2, 1), trend_freq_loss,orth_loss,smooth_loss,season_freq_loss,recon_loss
 def plot_tensors(tensor_list,file_name,index):
     project_path = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
@@ -729,15 +766,16 @@ class Model(nn.Module):
         #     embed_dim=self.d_model,
         #     dropout=self.dropout,
         # )
+        self.denoising_patch_decoder = DenoisingPatchDecoder(
+            d_model=configs.d_model,
+            num_layers=configs.d_layers,
+            num_heads=configs.n_heads,
+            feedforward_dim=configs.d_ff,
+            dropout=configs.dropout,
+        )
         # Decoder
         if self.task_name == "pretrain":
-            self.denoising_patch_decoder = DenoisingPatchDecoder(
-                d_model=configs.d_model,
-                num_layers=configs.d_layers,
-                num_heads=configs.n_heads,
-                feedforward_dim=configs.d_ff,
-                dropout=configs.dropout,
-            )
+
 
 
             self.projection = nn.ModuleList(
@@ -1040,7 +1078,11 @@ class Model(nn.Module):
             M_float = M.float()
             loss_rec = ((x_hat_norm - x_clean_norm) ** 2 * M_float).sum() / (M_float.sum() + 1e-6)
         elif self.configs.pretrain_mode == 'noise':
-            loss_rec = F.mse_loss(x_hat_norm, x_clean_norm)
+            if self.configs.predict_eps == 1:
+                loss_rec = F.mse_loss(seasonal_hat, eps)
+            else:
+                loss_rec = F.mse_loss(x_hat_norm, x_clean_norm)
+
 
         # Instance Denormalization
         # predict_x = x_hat_norm * (stdevs[:, 0, :].unsqueeze(1)).repeat(
@@ -1053,9 +1095,8 @@ class Model(nn.Module):
         total_freq, total_orth, total_smooth, total_season_freq, total_recon_loss = freq_loss,orth_loss,smoothness,season_freq_loss,recon_loss
         return loss_rec,total_freq,total_orth,total_smooth,total_season_freq,total_recon_loss
 
-    def forecast(self, x,x_mark):
+    def forecast(self, x, x_mark):
         # x = torch.fft.fft(x,dim=-2).real
-
 
         batch_size, _, num_features = x.size()
         means = torch.mean(x, dim=1, keepdim=True).detach()
@@ -1068,59 +1109,62 @@ class Model(nn.Module):
         # x = self.inverse_embedding(x.permute(0,2,1)).permute(0,2,1)
 
         if self.configs.use_new_decomp == 1:
-            x, trend,freq_loss,orth_loss,smoothness,season_freq_loss,recon_loss = self.decomp_multi_learnable(x)
+            seasonal, trend, freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss = self.decomp_multi_learnable(x)
         else:
-            x, trend = self.decomp_multi(x)
-            freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss = torch.tensor(0.0), torch.tensor(0.0), torch.tensor(0.0), torch.tensor(0.0),torch.tensor(0.0)
+            seasonal, trend = self.decomp_multi(x)
+            freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss = torch.tensor(0.0), torch.tensor(
+                0.0), torch.tensor(0.0), torch.tensor(0.0), torch.tensor(0.0)
 
         # x, trend = x,x
-        x = self.channel_independence[0](x)  # [batch_size * num_features, input_len, 1]
-        x = self.patch(x)  # [batch_size * num_features, seq_len, patch_len]
+        seasonal_ci = self.channel_independence[0](seasonal)  # [batch_size * num_features, input_len, 1]
+        seasonal_ci = self.patch(seasonal_ci)  # [batch_size * num_features, seq_len, patch_len]
 
-        # x = torch.fft.fft(x,dim=-2).imag
-        x = self.enc_embedding(x)  # [batch_size * num_features, seq_len, d_model]
-
-
-        # --------------------------- 添加条件 begin
-        # 获取条件编码
-        # cond_encoded = self.conditional_encoding(x)  # [batch_size, 1, d_model]
-        # # 扩展条件编码以匹配批次和特征维度
-        # cond_encoded = cond_encoded.repeat_interleave(x.size(0) // cond_encoded.size(0),
-        #                                               dim=0)  # [batch_size * num_features, 1, d_model]
-        # cond_encoded = cond_encoded.expand(-1, x.size(1), -1)  # [batch_size * num_features, seq_len, d_model]
-        #
-        # # 将条件编码添加到嵌入中
-        # x = x + cond_encoded  # 结合条件编码
-
-        # --------------------------- 添加条件 end
+        seasonal_emb = self.enc_embedding(seasonal_ci)  # [batch_size * num_features, seq_len, d_model]
 
         if self.configs.use_positional_encoding == 1:
-
-            x = self.positional_encoding(x)  # [batch_size * num_features, seq_len, d_model]
+            seasonal_emb_pos = self.positional_encoding(seasonal_emb)  # [batch_size * num_features, seq_len, d_model]
         else:
-            x = x
+            seasonal_emb_pos = seasonal_emb
 
-        # x, _ = self.decomp_multi(x)
-        # x, _ = x,x
-
-        x = self.encoder(
-            x,
+        emb = self.encoder(
+            seasonal_emb_pos,
             is_mask=False,
         )  # [batch_size * num_features, seq_len, d_model]
-        x = x.reshape(
+        # 可选：FiLM
+        if getattr(self.configs, 'use_film_in_ft', 0) == 1:
+            ti = self.channel_independence[0](trend)
+            tp = self.patch(ti)
+            t_emb = self.enc_embedding_trend(tp)
+            if self.configs.use_positional_encoding == 1:
+                t_emb = self.positional_encoding(t_emb)
+            zeros_t = torch.zeros_like(emb)
+            h = torch.cat([zeros_t, t_emb], -1)
+            gamma = 1.0 + 0.1 * torch.tanh(self.cond_to_gamma(h))
+            beta = 0.1 * torch.tanh(self.cond_to_beta(h))
+            emb = gamma * emb + beta
+            # 可选：复用去噪层做细化
+            if getattr(self.configs, 'use_refine_in_ft', 0) == 1:
+                feat = emb
+                for layer in self.denoise_layers_cond:
+                    feat = feat + layer(feat, gamma, beta)
+                emb = feat
+
+
+
+
+        seasonal_enc = emb.reshape(
             batch_size, num_features, -1, self.d_model
         )  # [batch_size, num_features, seq_len, d_model]
         # x = torch.fft.ifft(x,dim=-2).real
         # forecast
-        x = self.head(x)  # [bs, pred_len, n_vars]
-        x = x + self.regression[0](trend.permute(0, 2, 1)).permute(0, 2, 1).contiguous()
+        seasonal_enc = self.head(seasonal_enc)  # [bs, pred_len, n_vars]
+        y_enc = seasonal_enc + self.regression[0](trend.permute(0, 2, 1)).permute(0, 2, 1).contiguous()
 
         # denormalization
-        x = x * (stdevs[:, 0, :].unsqueeze(1)).repeat(1, self.pred_len, 1)
-        x = x + (means[:, 0, :].unsqueeze(1)).repeat(1, self.pred_len, 1)
+        y_enc = y_enc * (stdevs[:, 0, :].unsqueeze(1)).repeat(1, self.pred_len, 1)
+        y_enc = y_enc + (means[:, 0, :].unsqueeze(1)).repeat(1, self.pred_len, 1)
 
-
-        return x,freq_loss,orth_loss,smoothness,season_freq_loss,recon_loss
+        return y_enc, freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss
         # return x,0,0,0
 
     def forward(self, batch_x,x_mask,i=0):
