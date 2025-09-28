@@ -86,8 +86,7 @@ del_season_freq_loss=1
 del_freq_loss=0
 del_smoothness_loss=0
 del_recon_loss=0
-#del_smoothness_loss=1
-#del_recon_loss=1
+
 # h1m1 01000
 
 
