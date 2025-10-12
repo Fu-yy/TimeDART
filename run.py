@@ -262,6 +262,10 @@ parser.add_argument('--pretrained_backbone', type=int , help='pretrained_backbon
 parser.add_argument('--pretrain_noise', type=str , help='mask or tembed', default='mask')
 parser.add_argument('--predict_eps', type=int, help='predict_eps', default=1)
 parser.add_argument('--use_refine_in_ft', type=int, help='use_refine_in_ft', default=0)
+parser.add_argument('--use_pretrain_in_ft', type=int, help='use_pretrain_in_ft', default=1)
+parser.add_argument('--film_mode', type=str, help='film_mode', default='full')
+parser.add_argument('--destroy_season', type=int, help='destroy_season', default=1)
+
 
 
 

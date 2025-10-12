@@ -512,105 +512,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class LearnableMultiScaleDecomp(nn.Module):
-    def __init__(self, nvar, scales=[17, 45, 87]):
-        super().__init__()
-        self.nvar = nvar
-        self.scales = [k if k % 2 == 1 else k + 1 for k in scales]
-        self.num_scales = len(scales)
-
-        # 多尺度卷积组
-        self.conv_layers = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv1d(nvar, nvar, kernel_size=k, padding=(k-1)//2, groups=nvar, bias=False),
-                nn.InstanceNorm1d(nvar)
-            ) for k in self.scales
-        ])
-
-        # 动态权重生成器（修正分组维度）
-        self.weight_gen = nn.Sequential(
-            # 输入通道nvar，输出nvar*16，分组数nvar（确保可整除）
-            nn.Conv1d(nvar, nvar*16, kernel_size=3, padding=1, groups=nvar),
-            nn.GELU(),
-            # 输出通道调整为nvar*num_scales，保持分组数nvar
-            nn.Conv1d(nvar*16, nvar*self.num_scales, kernel_size=3, padding=1, groups=nvar)
-        )
-
-        self._initialize_weights()
-
-    def _initialize_weights(self):
-        for conv in self.conv_layers:
-            kernel_size = conv[0].kernel_size[0]
-            conv[0].weight.data = torch.ones_like(conv[0].weight) / kernel_size
-
-        nn.init.normal_(self.weight_gen[0].weight, mean=0, std=0.01)
-        nn.init.constant_(self.weight_gen[0].bias, 0.1)
-        # 最后一层初始化调整为nvar*num_scales
-        nn.init.normal_(self.weight_gen[-1].weight, mean=0, std=0.01/self.num_scales)
-
-    def forward(self, x):
-        B, L, C = x.shape
-        x = x.permute(0, 2, 1)  # [B, C, L]
-
-        # 多尺度趋势提取（保持[B, C, L, K]结构）
-        trends = []
-        for conv in self.conv_layers:
-            trend = conv(x)  # [B, C, L]
-            trends.append(trend.unsqueeze(-1))  # [B, C, L, 1]
-        trends = torch.cat(trends, dim=-1)  # [B, C, L, K=3]
-
-        # 动态权重处理（维度对齐）
-        weights = self.weight_gen(x)  # [B, C*K, L]
-        weights = weights.view(B, self.nvar, self.num_scales, L)  # [B, C, K, L]
-        weights = F.softmax(weights, dim=2)  # 沿K维度归一化
-
-        # 维度对齐运算（关键修正）
-        fused_trend = torch.einsum('bclk,bckl->bcl', trends, weights)
-
-
-
-        seasonal = x - fused_trend
-        # 频域约束
-        trend_fft = torch.fft.rfft(fused_trend, dim=2)  # 时间维度为dim=2
-        freq_loss = torch.mean(torch.abs(trend_fft[..., 3:]) ** 2)  # 取高频分量
-        # 正交约束
-        orth_loss = torch.mean(torch.mean(seasonal * fused_trend, dim=2)) ** 2  # [B,C,L]逐点相乘后求和
-        smoothness = torch.mean(torch.diff(fused_trend, n=2, dim=2) ** 2)
-        return seasonal.permute(0, 2, 1), fused_trend.permute(0, 2, 1),freq_loss,orth_loss,smoothness
-
-class TrendExtractorConv(nn.Module):
-    def __init__(self, input_dim, d_model, kernel_size=3):
-        super(TrendExtractorConv, self).__init__()
-        self.conv = nn.Conv1d(in_channels=input_dim, out_channels=d_model, kernel_size=kernel_size,
-                              padding=kernel_size // 2)
-        self.activation = nn.ReLU()
-        # self.pool = nn.AdaptiveAvgPool1d(1)  # 将每个特征图压缩为一个值
-
-    def forward(self, x):
-        # x: [batch_size, seq_len, input_dim]
-        x = x.permute(0, 2, 1)  # [batch_size, input_dim, seq_len]
-        x = self.conv(x)  # [batch_size, d_model, seq_len]
-        x = self.activation(x)
-        return x.permute(0, 2, 1).contiguous()
-
-
-class ConditionalEncoding(nn.Module):
-    def __init__(self, input_dim, d_model):
-        super(ConditionalEncoding, self).__init__()
-        self.trend_extractor = TrendExtractorConv(input_dim, d_model)
-        self.condition_proj = nn.Linear(d_model, d_model)
-        self.activation = nn.ReLU()
-
-    def forward(self, x):
-        """
-        x: [batch_size, seq_len, input_dim]
-        返回: [batch_size, 1, d_model]
-        """
-        trend = self.trend_extractor(x)  # [batch_size, 1, d_model]
-        cond_encoded = self.condition_proj(trend)  # [batch_size, 1, d_model]
-        cond_encoded = self.activation(cond_encoded)
-        return cond_encoded
-
 
 
 
@@ -753,30 +654,9 @@ class Model(nn.Module):
             num_layers=configs.e_layers,
         )
 
-        # 条件编码模块
-        # 假设条件信息维度为 configs.condition_dim
-        self.conditional_encoding = ConditionalEncoding(
-            input_dim=self.d_model,
-            d_model=self.d_model
-        )
-        # 在 Model 类中替换 ConditionalEncoding
-        # self.conditional_encoding_att = SeqAttention(
-        #     target_dim=self.d_model,
-        #     num_heads=self.num_heads,
-        #     embed_dim=self.d_model,
-        #     dropout=self.dropout,
-        # )
-        self.denoising_patch_decoder = DenoisingPatchDecoder(
-            d_model=configs.d_model,
-            num_layers=configs.d_layers,
-            num_heads=configs.n_heads,
-            feedforward_dim=configs.d_ff,
-            dropout=configs.dropout,
-        )
+
         # Decoder
         if self.task_name == "pretrain":
-
-
 
             self.projection = nn.ModuleList(
                 [FlattenHead(
@@ -788,10 +668,7 @@ class Model(nn.Module):
                     for i in range(configs.down_sampling_layers + 1)
                 ]
             )
-            self.regression = nn.ModuleList([
-                nn.Linear(self.input_len // (configs.down_sampling_window ** i), self.input_len)
-                for i in range(configs.down_sampling_layers + 1)
-            ])
+
             self.regression = nn.ModuleList([
                 nn.Linear(self.input_len, self.input_len)
                 for i in range(configs.down_sampling_layers + 1)
@@ -807,22 +684,7 @@ class Model(nn.Module):
             #     dropout=configs.head_dropout,
             # )
 
-            self.head = nn.ModuleList(
-                [FlattenHead(
-                    seq_len=self.seq_len // (configs.down_sampling_window ** i),
-                    d_model=self.d_model,
-                    pred_len=configs.pred_len,
-                    dropout=configs.head_dropout,
-                )
-                    for i in range(configs.down_sampling_layers + 1)
-                ]
-            )
 
-            # self.regression = nn.Linear(self.input_len, configs.pred_len)
-            self.regression = nn.ModuleList([
-                nn.Linear(self.input_len // (configs.down_sampling_window ** i), configs.pred_len)
-                for i in range(configs.down_sampling_layers + 1)
-            ])
 
             self.head = FlattenHead(
                     seq_len=self.seq_len,
@@ -837,26 +699,6 @@ class Model(nn.Module):
                 for i in range(configs.down_sampling_layers + 1)
             ])
 
-        # 自适应可学习权重参数
-        # 自适应损失权重参数
-
-        # self.log_var_freq = nn.Parameter(torch.log(torch.tensor(self.configs.log_var_freq)), requires_grad=True)
-        # self.log_var_orth = nn.Parameter(torch.log(torch.tensor(self.configs.log_var_orth)), requires_grad=True)
-        # self.log_var_smooth = nn.Parameter(torch.log(torch.tensor(self.configs.log_var_smooth)), requires_grad=True)
-        # self.log_var_season_freq = nn.Parameter(torch.log(torch.tensor(self.configs.log_var_season_freq)),
-        #                                         requires_grad=True)
-        # self.log_var_recon = nn.Parameter(torch.log(torch.tensor(self.configs.log_var_recon)), requires_grad=True)
-
-
-        # self.log_var_freq = nn.Parameter(torch.log(torch.tensor(1.0)))  # 频率损失初始权重 ≈0.5
-        # self.log_var_orth = nn.Parameter(torch.log(torch.tensor(300.0)))  # 正交损失初始权重 ≈0.0017
-        # self.log_var_smooth = nn.Parameter(torch.log(torch.tensor(0.001)))  # 平滑损失初始权重 ≈500
-        # self.log_var_season_freq = nn.Parameter(torch.log(torch.tensor(5.0)))  # 季节频率初始权重 ≈0.1
-
-        # self.log_var_freq = torch.tensor(self.configs.log_var_freq)
-        # self.log_var_orth = torch.tensor(self.configs.log_var_orth)
-        # self.log_var_smooth = torch.tensor(self.configs.log_var_smooth)
-        # self.log_var_season_freq = torch.tensor(self.configs.log_var_season_freq)
         if self.configs.use_init_loss == 1:
             self.log_var_freq = nn.Parameter(torch.zeros(1), requires_grad=True)
             self.log_var_orth = nn.Parameter(torch.zeros(1), requires_grad=True)
@@ -871,31 +713,13 @@ class Model(nn.Module):
             self.log_var_season_freq = nn.Parameter(torch.tensor(self.configs.log_var_season_freq), requires_grad=True)
             self.log_var_recon = nn.Parameter(torch.tensor(self.configs.log_var_recon), requires_grad=True)
 
-        # self.log_var_freq = nn.Parameter(torch.log(torch.tensor(0.1)))
-        # self.log_var_orth = nn.Parameter(torch.log(torch.tensor(0.1)))
-        # self.log_var_smooth = nn.Parameter(torch.log(torch.tensor(0.1)))
-        # self.log_var_season_freq = nn.Parameter(torch.log(torch.tensor(0.1)))
-        # self.log_var_recon = nn.Parameter(torch.log(torch.tensor(0.1)))
+
 
 
         self.decomp_multi = series_decomp(95)
         self.decomp_multi_learnable = StopLearnableMultiScaleDecomp(self.configs.c_out,max_lag=63,num_scales=4,peak_threshold=0.3,distance=10)
-        # self.decomp_multi_learnable_second = StopLearnableMultiScaleDecomp(self.patch_len,num_scales=4)
-        self.decomp_multi_learnable_third = StopLearnableMultiScaleDecomp(self.d_model, max_lag=31,num_scales=4,peak_threshold=0.1,distance=3)
-        # self.decomp_multi_learnable = LearnableMultiScaleDecomp(self.configs.c_out)
-        # self.decomp_multi_learnable_second = LearnableMultiScaleDecomp(self.patch_len,scales=[5, 13, 25])
-        # self.decomp_multi_learnable_third = LearnableMultiScaleDecomp(self.d_model,scales=[5, 13, 25])
+
         self.denoise_layers_num = configs.denoise_layers_num
-        self.denoise_layers = nn.ModuleList([
-            DenoisingPatchDecoder(
-                d_model=configs.d_model,
-                num_layers=configs.d_layers,
-                num_heads=configs.n_heads,
-                feedforward_dim=configs.d_ff,
-                dropout=configs.dropout,
-            )
-            for _ in range(self.denoise_layers_num)
-        ])
 
         self.denoise_layers_cond = nn.ModuleList([
             DenoisingConditionDecoder(
@@ -939,11 +763,6 @@ class Model(nn.Module):
             self.log_var_smooth.data = smooth_loss + 1e-8
             self.log_var_season_freq.data = season_freq_loss + 1e-8
             self.log_var_recon.data = recon_loss + 1e-8
-            # self.log_var_freq.data = torch.log(freq_loss + 1e-8)
-            # self.log_var_orth.data = torch.log(orth_loss + 1e-8)
-            # self.log_var_smooth.data = torch.log(smooth_loss + 1e-8)
-            # self.log_var_season_freq.data = torch.log(season_freq_loss + 1e-8)
-            # self.log_var_recon.data = torch.log(recon_loss + 1e-8)
 
     def pretrain(self, x,x_mask,i=0):
 
@@ -987,9 +806,12 @@ class Model(nn.Module):
                 seasonal_tilde = torch.where(M, torch.zeros_like(seasonal), seasonal)  # 被遮盖处=0
                 x_tilde = trend + seasonal_tilde
             else:
-                M = block_mask_torch(B, L, C, masking_ratio=0.5, block=12,
+                M = block_mask_torch(B, L, C, masking_ratio=self.configs.mask_ratio, block=self.configs.mask_block,
                                      shared_channels=True, variable_block=True, device=x.device)
+
+                # c = M.mean()
                 seasonal_tilde = seasonal.masked_fill(M, 0.0)
+                # d = seasonal_tilde.mean()
                 x_tilde = trend + seasonal_tilde
         elif self.configs.pretrain_mode == 'noise':
             # -------- 对季节项加扩散噪声（时间域）--------
@@ -1056,14 +878,43 @@ class Model(nn.Module):
             t_emb = torch.zeros_like(x_emb)
 
         # -------- FiLM 条件 --------
+        # h = torch.cat([t_emb, cond_trend], dim=-1)  # [B*C, S, 2D]
+        # gamma = 1.0 + 0.1 * torch.tanh(self.cond_to_gamma(h))
+        # beta = 0.1 * torch.tanh(self.cond_to_beta(h))
+
+        # -------- FiLM 条件 --------
         h = torch.cat([t_emb, cond_trend], dim=-1)  # [B*C, S, 2D]
-        gamma = 1.0 + 0.1 * torch.tanh(self.cond_to_gamma(h))
-        beta = 0.1 * torch.tanh(self.cond_to_beta(h))
+
+        if getattr(self.configs, 'film_mode', 'full') == 'full':
+            # 原版：trend + t 都参与
+            gamma = 1.0 + 0.1 * torch.tanh(self.cond_to_gamma(h))
+            beta = 0.1 * torch.tanh(self.cond_to_beta(h))
+
+        elif self.configs.film_mode == 'none':
+            # 消融：关闭 FiLM 调制
+            gamma = torch.ones_like(h[..., :self.d_model])
+            beta = torch.zeros_like(h[..., :self.d_model])
+
+        elif self.configs.film_mode == 'random':
+            # 消融：随机调制
+            gamma = 1.0 + 0.1 * torch.randn_like(h[..., :self.d_model])
+            beta = 0.1 * torch.randn_like(h[..., :self.d_model])
+
+        elif self.configs.film_mode == 'trend_only':
+            # 消融：只用趋势条件
+            gamma = 1.0 + 0.1 * torch.tanh(self.cond_to_gamma(cond_trend))
+            beta = 0.1 * torch.tanh(self.cond_to_beta(cond_trend))
+
+        elif self.configs.film_mode == 't_only':
+            # 消融：只用时间步嵌入
+            gamma = 1.0 + 0.1 * torch.tanh(self.cond_to_gamma(t_emb))
+            beta = 0.1 * torch.tanh(self.cond_to_beta(t_emb))
 
         # 多层残差去噪
         feat = x_emb
-        for layer in self.denoise_layers_cond:
-            feat = feat + layer(feat, gamma, beta)
+        if getattr(self.configs, 'use_pretrain_in_ft', 0) == 1:
+            for layer in self.denoise_layers_cond:
+                feat = feat + layer(feat, gamma, beta)
 
         # --- 投影：直接回到 seasonal_hat（推荐）---
         feat = feat.view(B, C, -1, self.d_model)  # [B, C, S, D]
@@ -1082,15 +933,6 @@ class Model(nn.Module):
                 loss_rec = F.mse_loss(seasonal_hat, eps)
             else:
                 loss_rec = F.mse_loss(x_hat_norm, x_clean_norm)
-
-
-        # Instance Denormalization
-        # predict_x = x_hat_norm * (stdevs[:, 0, :].unsqueeze(1)).repeat(
-        #     1, input_len, 1
-        # )  # [batch_size, input_len, num_features]
-        # predict_x = predict_x + (means[:, 0, :].unsqueeze(1)).repeat(
-        #     1, input_len, 1
-        # )  # [batch_size, input_len, num_features]
 
         total_freq, total_orth, total_smooth, total_season_freq, total_recon_loss = freq_loss,orth_loss,smoothness,season_freq_loss,recon_loss
         return loss_rec,total_freq,total_orth,total_smooth,total_season_freq,total_recon_loss
@@ -1138,10 +980,41 @@ class Model(nn.Module):
             if self.configs.use_positional_encoding == 1:
                 t_emb = self.positional_encoding(t_emb)
             zeros_t = torch.zeros_like(emb)
-            h = torch.cat([zeros_t, t_emb], -1)
-            gamma = 1.0 + 0.1 * torch.tanh(self.cond_to_gamma(h))
-            beta = 0.1 * torch.tanh(self.cond_to_beta(h))
-            emb = gamma * emb + beta
+
+
+
+            # h = torch.cat([zeros_t, t_emb], -1)
+            # gamma = 1.0 + 0.1 * torch.tanh(self.cond_to_gamma(h))
+            # beta = 0.1 * torch.tanh(self.cond_to_beta(h))
+            # emb = gamma * emb + beta
+            # -------- FiLM 条件 --------
+            h = torch.cat([zeros_t, t_emb], dim=-1)  # [B*C, S, 2D]
+
+            if getattr(self.configs, 'film_mode', 'full') == 'full':
+                # 原版：trend + t 都参与
+                gamma = 1.0 + 0.1 * torch.tanh(self.cond_to_gamma(h))
+                beta = 0.1 * torch.tanh(self.cond_to_beta(h))
+
+            elif self.configs.film_mode == 'none':
+                # 消融：关闭 FiLM 调制
+                gamma = torch.ones_like(h[..., :self.d_model])
+                beta = torch.zeros_like(h[..., :self.d_model])
+
+            elif self.configs.film_mode == 'random':
+                # 消融：随机调制
+                gamma = 1.0 + 0.1 * torch.randn_like(h[..., :self.d_model])
+                beta = 0.1 * torch.randn_like(h[..., :self.d_model])
+
+            elif self.configs.film_mode == 'trend_only':
+                # 消融：只用趋势条件
+                gamma = 1.0 + 0.1 * torch.tanh(self.cond_to_gamma(t_emb))
+                beta = 0.1 * torch.tanh(self.cond_to_beta(t_emb))
+
+            elif self.configs.film_mode == 't_only':
+                # 消融：只用时间步嵌入
+                gamma = 1.0 + 0.1 * torch.tanh(self.cond_to_gamma(zeros_t))
+                beta = 0.1 * torch.tanh(self.cond_to_beta(zeros_t))
+
             # 可选：复用去噪层做细化
             if getattr(self.configs, 'use_refine_in_ft', 0) == 1:
                 feat = emb

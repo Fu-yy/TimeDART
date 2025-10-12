@@ -700,6 +700,61 @@ class Exp_TimeDART(Exp_Basic):
         self.lr = model_scheduler.get_last_lr()[0]
 
         return self.model
+    def train_count_params(self, setting):
+        from thop import profile
+        from thop import clever_format
+
+        train_data, train_loader = self._get_data(flag="train")
+        vali_data, vali_loader = self._get_data(flag="val")
+        test_data, test_loader = self._get_data(flag="test")
+
+
+
+
+        model_optim = self._select_optimizer()
+        model_scheduler = lr_scheduler.OneCycleLR(
+            optimizer=model_optim,
+            steps_per_epoch=len(train_loader),
+            pct_start=self.args.pct_start,
+            epochs=self.args.train_epochs,
+            max_lr=self.args.learning_rate,
+        )
+
+        for epoch in range(self.args.train_epochs):
+            train_loader = tqdm(train_loader, desc="Training")
+
+            print("Current learning rate: {:.7f}".format(model_scheduler.get_last_lr()[0]))
+
+            self.model.train()
+            if self.args.use_init_loss == 1:
+                simple_batch_x, simple_batch_y, simple_batch_x_mark, simple_batch_y_mark = next(
+                    iter(train_loader))  # 获取一个批次
+                simple_batch_x = simple_batch_x.float().to(self.device)
+
+                self.model.init_adaptive_weights(simple_batch_x)
+
+
+            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(
+                train_loader
+            ):
+                model_optim.zero_grad()
+
+                batch_x = batch_x.float().to(self.device)
+
+                macs, params = profile(self.model, inputs=(batch_x,None,i))
+                macs, params = clever_format([macs, params], "%.3f")
+
+                print("models: {},datasets: {},seq_len:{},pred_len: {},macs: {}, params: {}".format(self.args.model,
+                                                                                                    self.args.data,
+                                                                                                    self.args.seq_len,
+                                                                                                    self.args.pred_len,
+                                                                                                    macs, params))
+                result_str = ("models: " + str(self.args.model) + ",datasets:" + self.args.data +
+                              ",seq_len:" + str(self.args.seq_len) + ",pred_len: " + str(
+                            self.args.pred_len) + ",macs:" + str(macs) + ", params:" + str(params))
+                break
+            break
+        return result_str
 
     def valid(self, vali_loader, model_criteria):
         vali_loss = []
@@ -746,6 +801,7 @@ class Exp_TimeDART(Exp_Basic):
         folder_path = folder_path + '_dln_' + str(self.args.denoise_layers_num)
         if not os.path.exists(folder_path):
             os.makedirs(folder_path)
+        infer_start = time.time()
 
         self.model.eval()
         with torch.no_grad():
@@ -786,6 +842,14 @@ class Exp_TimeDART(Exp_Basic):
 
         # preds = np.array(preds)
         # trues = np.array(trues)
+        # 结束后统计整体推理耗时
+        total_time = time.time() - infer_start
+        n_samples_total = len(test_data)  # 或者循环里累加 batch_x.size(0)
+
+        ms_per_sample = (total_time / n_samples_total) * 1000.0
+        samples_per_sec = n_samples_total / total_time
+        print(f"[Inference][Total] {ms_per_sample:.3f} ms/sample | {samples_per_sec:.1f} samples/s "
+              f"(total_samples={n_samples_total})")
         preds = torch.stack(preds, dim=0).numpy()
         trues = torch.stack(trues, dim=0).numpy()
         preds = preds.reshape(-1, preds.shape[-2], preds.shape[-1])
@@ -799,6 +863,8 @@ class Exp_TimeDART(Exp_Basic):
         )
         f = open(folder_path + "/score.txt", "a")
         from datetime import datetime
+        params_str = self.train_count_params(self.args)
+        f.write('params:{}'.format(params_str) + "  \n")
 
         # 获取当前时间
         now = datetime.now()
