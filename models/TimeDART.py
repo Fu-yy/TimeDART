@@ -574,6 +574,58 @@ class DenoisingConditionDecoder(nn.Module):
 
 
 
+class StableCondDenoiser(nn.Module):
+    def __init__(self, d_model, n_heads=4, dropout=0.1, use_film=1):
+        super().__init__()
+        self.use_film = use_film
+        self.ln_q = nn.LayerNorm(d_model)
+        self.ln_kv = nn.LayerNorm(d_model)
+        self.attn = nn.MultiheadAttention(d_model, n_heads, dropout=dropout, batch_first=True)
+        self.ff = nn.Sequential(
+            nn.Linear(d_model, 2*d_model), nn.GELU(), nn.Dropout(dropout),
+            nn.Linear(2*d_model, d_model), nn.Dropout(dropout)
+        )
+        if use_film == 1:
+            self.film = nn.Sequential(
+                nn.Linear(2*d_model, d_model), nn.SiLU(),
+                nn.Linear(d_model, 2*d_model)  # -> [gamma, beta]
+            )
+        self.ln_out = nn.LayerNorm(d_model)
+
+    @staticmethod
+    def _orth_residual(x, delta, eps=1e-6):
+        # 从 delta 中去掉在 x 方向的投影，避免“复制输入”的退化
+        # 逐 token 做：proj = <delta,x>/<x,x> * x
+        num = (delta * x).sum(-1, keepdim=True)
+        den = (x * x).sum(-1, keepdim=True) + eps
+        proj = num / den * x
+        return delta - proj
+
+    def forward(self, noisy, context, cond=None, key_padding_mask=None):
+        """
+        noisy:   [B, S, D]  待去噪的序列（掩码重建或扩散噪声）
+        context: [B, S, D]  供检索的上下文（如季节/趋势/clean encoder）
+        cond:    [B, S, D]  额外条件（如趋势嵌入、t-embedding），可为 None
+        """
+        q = self.ln_q(noisy)
+        kv = self.ln_kv(context)
+
+        # (1) 可选 FiLM：只对 q 做仿射，不把 cond 与 noisy 直接拼接/相加
+        if self.use_film == 1 and cond is not None:
+            h = torch.cat([q, cond], dim=-1)
+            gamma_beta = self.film(h)
+            gamma, beta = gamma_beta.chunk(2, dim=-1)
+            q = (1.0 + 0.1 * torch.tanh(gamma)) * q + 0.1 * torch.tanh(beta)
+
+        # (2) 跨注意力：Q=noisy(经LN), K=V=context；确保 K/V 是“有结构的表征”，不是标量门控
+        attn_out, _ = self.attn(q, kv, kv, key_padding_mask=key_padding_mask, need_weights=False)
+
+        # (3) 正交化残差 + FFN
+        delta = self._orth_residual(noisy, attn_out)         # 去掉与输入共线的部分
+        y = noisy + delta                                    # 残差1
+        y = y + self.ff(self.ln_out(y))                      # 残差2（前归一化）
+
+        return y
 
 
 
@@ -646,13 +698,7 @@ class Model(nn.Module):
             dropout=configs.dropout,
             num_layers=configs.e_layers,
         )
-        self.encoder_noise = CausalTransformer(
-            d_model=configs.d_model,
-            num_heads=configs.n_heads,
-            feedforward_dim=configs.d_ff,
-            dropout=configs.dropout,
-            num_layers=configs.e_layers,
-        )
+
 
 
         # Decoder
@@ -717,15 +763,24 @@ class Model(nn.Module):
 
 
         self.decomp_multi = series_decomp(95)
-        self.decomp_multi_learnable = StopLearnableMultiScaleDecomp(self.configs.c_out,max_lag=63,num_scales=4,peak_threshold=0.3,distance=10)
+        self.decomp_multi_learnable = StopLearnableMultiScaleDecomp(self.configs.c_out,max_lag=self.configs.max_lag,num_scales=self.configs.num_scales,peak_threshold=self.configs.peak_threshold,distance=10)
 
         self.denoise_layers_num = configs.denoise_layers_num
 
+        # self.denoise_layers_cond = nn.ModuleList([
+        #     DenoisingConditionDecoder(
+        #         embed_dim=configs.d_model,
+        #         num_heads=configs.n_heads,
+        #         dropout=configs.dropout,
+        #     )
+        #     for _ in range(self.denoise_layers_num)
+        # ])
         self.denoise_layers_cond = nn.ModuleList([
-            DenoisingConditionDecoder(
-                embed_dim=configs.d_model,
-                num_heads=configs.n_heads,
+            StableCondDenoiser(
+                d_model=configs.d_model,
+                n_heads=configs.n_heads,
                 dropout=configs.dropout,
+                use_film=self.configs.use_film,
             )
             for _ in range(self.denoise_layers_num)
         ])
@@ -752,6 +807,9 @@ class Model(nn.Module):
             patch_len=self.patch_len,
             d_model=self.d_model,
         )
+        self.stable_denoiser = StableCondDenoiser(d_model=self.d_model, n_heads=self.num_heads, dropout=self.dropout,
+                                                  use_film=True)
+        self.cond_proj = nn.Linear(self.d_model, self.d_model)  # 轻量投影，避免尺度打架
     def init_adaptive_weights(self, sample_batch):
         """ 用样本数据初始化自适应权重 """
         with torch.no_grad():
@@ -802,26 +860,47 @@ class Model(nn.Module):
                     shared_channels=True,
                     device=x.device
                 )  # [B,L,C], True=遮盖
-
-                seasonal_tilde = torch.where(M, torch.zeros_like(seasonal), seasonal)  # 被遮盖处=0
-                x_tilde = trend + seasonal_tilde
+                if self.configs.destroy_mode == 'season':
+                    seasonal_tilde = torch.where(M, torch.zeros_like(seasonal), seasonal)  # 被遮盖处=0
+                    x_tilde = trend + seasonal_tilde
+                elif self.configs.destroy_mode == 'trend':
+                    trend_tilde = torch.where(M, torch.zeros_like(trend), trend)  # 被遮盖处=0
+                    x_tilde = trend_tilde + seasonal
+                elif self.configs.destroy_mode == 'x':
+                    x_tilde = torch.where(M, torch.zeros_like(x), x)  # 被遮盖处=0
             else:
                 M = block_mask_torch(B, L, C, masking_ratio=self.configs.mask_ratio, block=self.configs.mask_block,
                                      shared_channels=True, variable_block=True, device=x.device)
+                if self.configs.destroy_mode == 'season':
 
-                # c = M.mean()
-                seasonal_tilde = seasonal.masked_fill(M, 0.0)
-                # d = seasonal_tilde.mean()
-                x_tilde = trend + seasonal_tilde
+                    # c = M.mean()
+                    seasonal_tilde = seasonal.masked_fill(M, 0.0)
+                    # d = seasonal_tilde.mean()
+                    x_tilde = trend + seasonal_tilde
+                elif self.configs.destroy_mode == 'trend':
+                    trend_tilde = trend.masked_fill(M, 0.0)
+                    x_tilde = trend_tilde + seasonal
+                elif self.configs.destroy_mode == 'x':
+                    x_tilde = x.masked_fill(M, 0.0)
         elif self.configs.pretrain_mode == 'noise':
             # -------- 对季节项加扩散噪声（时间域）--------
             # 采样一个 t（也可 token 级），这里用样本级标量 t
             t = self.diffusion.sample_time_steps((B,))  # [B]
             # 广播到 [B,L,C]
             gamma_t = self.diffusion.gamma[t].view(B, 1, 1).to(device)
-            eps = torch.randn_like(seasonal)
-            noisy_seasonal = torch.sqrt(gamma_t) * seasonal + torch.sqrt(1 - gamma_t) * eps
-            x_tilde = trend + noisy_seasonal  # 只对 seasonal 加噪，趋势保真
+            if self.configs.destroy_mode == 'season':
+
+                eps = torch.randn_like(seasonal)
+                noisy_seasonal = torch.sqrt(gamma_t) * seasonal + torch.sqrt(1 - gamma_t) * eps
+                x_tilde = trend + noisy_seasonal  # 只对 seasonal 加噪，趋势保真
+            elif self.configs.destroy_mode == 'trend':
+                eps = torch.randn_like(trend)
+                noisy_trend = torch.sqrt(gamma_t) * trend + torch.sqrt(1 - gamma_t) * eps
+                x_tilde = seasonal + noisy_trend  # 只对 seasonal 加噪，趋势保真
+            elif self.configs.destroy_mode == 'x':
+                eps = torch.randn_like(x)
+                x_tilde = torch.sqrt(gamma_t) * trend + torch.sqrt(1 - gamma_t) * eps
+
         else:
             x_tilde = seasonal+trend
         # -------- 编码为 patch 表征 --------
@@ -847,11 +926,13 @@ class Model(nn.Module):
         # 分解  2
         # x_embedding_bias, _ = self.decomp_multi(x_embedding_bias)
         # x_embedding_bias, _ = x_embedding_bias,x_embedding_
-        x_emb  = self.encoder(
-            x_embedding_bias,
-            is_mask=False,
-        )  # [batch_size * num_features, seq_len, d_model]
-
+        if self.configs.use_pretrain_encoder == 1:
+            x_emb  = self.encoder(
+                x_embedding_bias,
+                is_mask=False,
+            )  # [batch_size * num_features, seq_len, d_model]
+        else:
+            x_emb=x_embedding_bias
         # 获取总去噪层数和扩散模型总时间步
 
 
@@ -883,38 +964,43 @@ class Model(nn.Module):
         # beta = 0.1 * torch.tanh(self.cond_to_beta(h))
 
         # -------- FiLM 条件 --------
-        h = torch.cat([t_emb, cond_trend], dim=-1)  # [B*C, S, 2D]
 
-        if getattr(self.configs, 'film_mode', 'full') == 'full':
-            # 原版：trend + t 都参与
-            gamma = 1.0 + 0.1 * torch.tanh(self.cond_to_gamma(h))
-            beta = 0.1 * torch.tanh(self.cond_to_beta(h))
 
-        elif self.configs.film_mode == 'none':
-            # 消融：关闭 FiLM 调制
-            gamma = torch.ones_like(h[..., :self.d_model])
-            beta = torch.zeros_like(h[..., :self.d_model])
-
-        elif self.configs.film_mode == 'random':
-            # 消融：随机调制
-            gamma = 1.0 + 0.1 * torch.randn_like(h[..., :self.d_model])
-            beta = 0.1 * torch.randn_like(h[..., :self.d_model])
-
-        elif self.configs.film_mode == 'trend_only':
-            # 消融：只用趋势条件
-            gamma = 1.0 + 0.1 * torch.tanh(self.cond_to_gamma(cond_trend))
-            beta = 0.1 * torch.tanh(self.cond_to_beta(cond_trend))
-
-        elif self.configs.film_mode == 't_only':
-            # 消融：只用时间步嵌入
-            gamma = 1.0 + 0.1 * torch.tanh(self.cond_to_gamma(t_emb))
-            beta = 0.1 * torch.tanh(self.cond_to_beta(t_emb))
 
         # 多层残差去噪
         feat = x_emb
         if getattr(self.configs, 'use_pretrain_in_ft', 0) == 1:
-            for layer in self.denoise_layers_cond:
-                feat = feat + layer(feat, gamma, beta)
+        # if self.configs.pretrain_mode == 'noise':
+
+            # 还原 B 和 C
+            B_times_C, S, D = feat.shape
+            B, C = B, C  # 已在上文得到
+            # 1) 组装 cond（掩码重建：trend；扩散：trend + t）
+            if self.configs.pretrain_mode == 'noise':
+                cond_bc = trend_emb + t_emb  # [B*C, S, D]
+            else:
+                cond_bc = trend_emb  # [B*C, S, D]
+            cond_bc = self.cond_proj(cond_bc)  # 轻量对齐到同尺度
+
+            # 2) 选择 context（建议先用 trend_emb，当先验；可尝试 .detach() 更稳）
+            context_bc = trend_emb.detach()  # [B*C, S, D] 先验，不回传梯度
+
+            # 3) reshape 到 [B, S, D]，把通道当“batch 维中的子批次”
+            feat_bsd = feat.view(B, C * S, D)  # 合并通道到序列会破坏时序，不建议
+            # 正确方式：把通道“并回 batch”，对每个变量独立做注意力
+            feat_bsd = feat.view(B, C, S, D).reshape(B * C, S, D)  # 仍是 [B*C, S, D]
+            context_bsd = context_bc.view(B * C, S, D)
+            cond_bsd = cond_bc.view(B * C, S, D)
+
+            # 4) 稳定条件去噪（共享骨干）
+            denoised_bsd = self.stable_denoiser(
+                noisy=feat_bsd,  # 被掩或加噪后的表征
+                context=context_bsd,  # 结构化先验（趋势或干净表征）
+                cond=cond_bsd,  # 条件：trend (+ t)
+                key_padding_mask=None
+            )  # [B*C, S, D]
+
+            feat = denoised_bsd  # 返回到 [B*C, S, D]
 
         # --- 投影：直接回到 seasonal_hat（推荐）---
         feat = feat.view(B, C, -1, self.d_model)  # [B, C, S, D]
@@ -933,7 +1019,8 @@ class Model(nn.Module):
                 loss_rec = F.mse_loss(seasonal_hat, eps)
             else:
                 loss_rec = F.mse_loss(x_hat_norm, x_clean_norm)
-
+        else:
+            loss_rec = F.mse_loss(x_hat_norm, x)
         total_freq, total_orth, total_smooth, total_season_freq, total_recon_loss = freq_loss,orth_loss,smoothness,season_freq_loss,recon_loss
         return loss_rec,total_freq,total_orth,total_smooth,total_season_freq,total_recon_loss
 
@@ -968,10 +1055,14 @@ class Model(nn.Module):
         else:
             seasonal_emb_pos = seasonal_emb
 
-        emb = self.encoder(
-            seasonal_emb_pos,
-            is_mask=False,
-        )  # [batch_size * num_features, seq_len, d_model]
+
+        if self.configs.use_finetune_encoder == 1:
+            emb = self.encoder(
+                seasonal_emb_pos,
+                is_mask=False,
+            )  # [batch_size * num_features, seq_len, d_model]
+        else:
+            emb=seasonal_emb_pos
         # 可选：FiLM
         if getattr(self.configs, 'use_film_in_ft', 0) == 1:
             ti = self.channel_independence[0](trend)

@@ -235,16 +235,11 @@ parser.add_argument('--use_denoise', type=int, help='use_denoise', default=1)
 parser.add_argument('--use_loss_compute', type=int, help='use_loss_compute', default=1)
 
 
-parser.add_argument('--max_lag', type=int, help='max_lag', default=63)
-parser.add_argument('--num_scales', type=int, help='num_scales', default=4)
-parser.add_argument('--peak_threshold', type=float, help='peak_threshold', default=0.3)
+
 parser.add_argument('--distance', type=int, help='distance', default=10)
 
 
-parser.add_argument('--max_lag_inner', type=int, help='max_lag_inner', default=31)
-parser.add_argument('--num_scales_inner', type=int, help='num_scales_inner', default=4)
-parser.add_argument('--peak_threshold_inner', type=float, help='peak_threshold_inner', default=0.1)
-parser.add_argument('--distance_inner', type=int, help='distance_inner', default=3)
+
 
 
 
@@ -265,6 +260,13 @@ parser.add_argument('--use_refine_in_ft', type=int, help='use_refine_in_ft', def
 parser.add_argument('--use_pretrain_in_ft', type=int, help='use_pretrain_in_ft', default=1)
 parser.add_argument('--film_mode', type=str, help='film_mode', default='full')
 parser.add_argument('--destroy_season', type=int, help='destroy_season', default=1)
+parser.add_argument('--use_film', type=int, help='use_film', default=1)
+parser.add_argument('--use_finetune_encoder', type=int, help='use_finetune_encoder', default=1)
+parser.add_argument('--use_pretrain_encoder', type=int, help='use_pretrain_encoder', default=1)
+parser.add_argument('--max_lag', type=int, help='max_lag', default=63)
+parser.add_argument('--num_scales', type=int, help='num_scales', default=4)
+parser.add_argument('--peak_threshold', type=float, help='peak_threshold', default=0.3)
+
 
 
 
