@@ -29,7 +29,91 @@ from collections import defaultdict
 import pickle
 
 warnings.filterwarnings("ignore")
+def _strip_module_prefix(state_dict):
+    """去掉DDP/DP保存产生的 'module.' 前缀"""
+    new_sd = OrderedDict()
+    for k, v in state_dict.items():
+        if k.startswith("module."):
+            new_sd[k[7:]] = v
+        else:
+            new_sd[k] = v
+    return new_sd
 
+def _extract_model_state_dict(ckpt_obj):
+    """
+    兼容多种保存格式：
+    - 直接是 state_dict（dict[str, Tensor]）
+    - {'state_dict': ...}
+    - {'model_state_dict': ...}
+    """
+    if isinstance(ckpt_obj, dict):
+        if "state_dict" in ckpt_obj and isinstance(ckpt_obj["state_dict"], dict):
+            return ckpt_obj["state_dict"]
+        if "model_state_dict" in ckpt_obj and isinstance(ckpt_obj["model_state_dict"], dict):
+            return ckpt_obj["model_state_dict"]
+    # 退化为“就当它本身是state_dict”
+    return ckpt_obj
+
+def _shape_adapt_if_scalar(param_tensor, ref_tensor):
+    """
+    当两边都是“标量语义”时，做 [] <-> [1] 的自适应：
+    - 旧ckpt: []  新模型: [1]  -> unsqueeze(0)
+    - 旧ckpt: [1] 新模型: []   -> squeeze(0)
+    其他情况保持不动。
+    """
+    t = param_tensor
+    want = ref_tensor
+    try:
+        if t.numel() == 1 and want.numel() == 1:
+            # 只在两个张量都是单元素时才考虑自适应
+            if t.dim() == 0 and want.dim() == 1 and want.shape == (1,):
+                return t.unsqueeze(0)
+            if t.dim() == 1 and t.shape == (1,) and want.dim() == 0:
+                return t.squeeze(0)
+    except Exception:
+        pass
+    return t
+
+def load_checkpoint_compat(model, checkpoint_path, map_location="cpu", verbose=True):
+    """
+    兼容加载：
+    1) 读取并提取state_dict；
+    2) 去掉module.前缀；
+    3) 针对“标量 <-> [1]”做形状自适应；
+    4) 仅加载模型中存在的键；
+    5) strict=False 加载并返回 missing/unexpected。
+    """
+    ckpt_obj = torch.load(checkpoint_path, map_location=map_location)
+    raw_sd = _extract_model_state_dict(ckpt_obj)
+    raw_sd = _strip_module_prefix(raw_sd)
+
+    model_sd = model.state_dict()
+    merged = OrderedDict()
+
+    for k, v in raw_sd.items():
+        if k in model_sd:
+            vv = _shape_adapt_if_scalar(v, model_sd[k])
+            # 若形状仍不匹配，跳过；否则记录
+            if vv.shape == model_sd[k].shape:
+                merged[k] = vv
+            else:
+                if verbose:
+                    print(f"[skip:shape] {k}: ckpt{tuple(v.shape)} != model{tuple(model_sd[k].shape)}")
+        else:
+            # 可以在这里加更智能的匹配（比如尾部匹配/别名映射），默认忽略
+            if verbose:
+                pass  # print(f"[skip:key] {k} 不在当前模型中")
+
+    # 用 merged 覆盖 model_sd 相同键
+    model_sd.update(merged)
+    missing, unexpected = model.load_state_dict(model_sd, strict=False)
+    if verbose:
+        print("[load_checkpoint_compat] loaded:", len(merged), "params")
+        if missing:
+            print("  missing keys:", missing)
+        if unexpected:
+            print("  unexpected keys:", unexpected)
+    return missing, unexpected
 
 class AdaptiveLossBalancer:
     def __init__(self, base_weights, momentum=0.9):
@@ -118,6 +202,8 @@ class Exp_TimeDART(Exp_Basic):
             momentum=0.95
         )
         self.loss_names = ['diff', 'freq', 'orth', 'smooth', 'season_freq', 'recon']
+        self.project_path= os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
+
 
     def _build_model(self):
         model = self.model_dict[self.args.model].Model(self.args).float()
@@ -478,6 +564,44 @@ class Exp_TimeDART(Exp_Basic):
         vali_loss = np.mean(vali_loss)
 
         return vali_loss
+    def train_count_params(self, setting):
+        from thop import profile
+        from thop import clever_format
+
+        train_data, train_loader = self._get_data(flag="train")
+        model_optim = self._select_optimizer()
+        model_scheduler = lr_scheduler.OneCycleLR(
+            optimizer=model_optim,
+            steps_per_epoch=len(train_loader),
+            pct_start=self.args.pct_start,
+            epochs=self.args.train_epochs,
+            max_lr=self.args.learning_rate,
+        )
+        for epoch in range(self.args.train_epochs):
+            train_loader = tqdm(train_loader, desc="Training")
+            print("Current learning rate: {:.7f}".format(model_scheduler.get_last_lr()[0]))
+            self.model.train()
+            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(
+                train_loader
+            ):
+                model_optim.zero_grad()
+
+                batch_x = batch_x.float().to(self.device)
+
+                macs, params = profile(self.model, inputs=(batch_x,None,i))
+                macs, params = clever_format([macs, params], "%.3f")
+
+                print("models: {},datasets: {},seq_len:{},pred_len: {},macs: {}, params: {}".format(self.args.model,
+                                                                                                    self.args.data,
+                                                                                                    self.args.seq_len,
+                                                                                                    self.args.pred_len,
+                                                                                                    macs, params))
+                result_str = ("models: " + str(self.args.model) + ",datasets:" + self.args.data +
+                              ",seq_len:" + str(self.args.seq_len) + ",pred_len: " + str(
+                            self.args.pred_len) + ",macs:" + str(macs) + ", params:" + str(params))
+                break
+            break
+        return result_str
 
     def train(self, setting):
         train_data, train_loader = self._get_data(flag="train")
@@ -700,61 +824,6 @@ class Exp_TimeDART(Exp_Basic):
         self.lr = model_scheduler.get_last_lr()[0]
 
         return self.model
-    def train_count_params(self, setting):
-        from thop import profile
-        from thop import clever_format
-
-        train_data, train_loader = self._get_data(flag="train")
-        vali_data, vali_loader = self._get_data(flag="val")
-        test_data, test_loader = self._get_data(flag="test")
-
-
-
-
-        model_optim = self._select_optimizer()
-        model_scheduler = lr_scheduler.OneCycleLR(
-            optimizer=model_optim,
-            steps_per_epoch=len(train_loader),
-            pct_start=self.args.pct_start,
-            epochs=self.args.train_epochs,
-            max_lr=self.args.learning_rate,
-        )
-
-        for epoch in range(self.args.train_epochs):
-            train_loader = tqdm(train_loader, desc="Training")
-
-            print("Current learning rate: {:.7f}".format(model_scheduler.get_last_lr()[0]))
-
-            self.model.train()
-            if self.args.use_init_loss == 1:
-                simple_batch_x, simple_batch_y, simple_batch_x_mark, simple_batch_y_mark = next(
-                    iter(train_loader))  # 获取一个批次
-                simple_batch_x = simple_batch_x.float().to(self.device)
-
-                self.model.init_adaptive_weights(simple_batch_x)
-
-
-            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(
-                train_loader
-            ):
-                model_optim.zero_grad()
-
-                batch_x = batch_x.float().to(self.device)
-
-                macs, params = profile(self.model, inputs=(batch_x,None,i))
-                macs, params = clever_format([macs, params], "%.3f")
-
-                print("models: {},datasets: {},seq_len:{},pred_len: {},macs: {}, params: {}".format(self.args.model,
-                                                                                                    self.args.data,
-                                                                                                    self.args.seq_len,
-                                                                                                    self.args.pred_len,
-                                                                                                    macs, params))
-                result_str = ("models: " + str(self.args.model) + ",datasets:" + self.args.data +
-                              ",seq_len:" + str(self.args.seq_len) + ",pred_len: " + str(
-                            self.args.pred_len) + ",macs:" + str(macs) + ", params:" + str(params))
-                break
-            break
-        return result_str
 
     def valid(self, vali_loader, model_criteria):
         vali_loss = []
@@ -791,14 +860,57 @@ class Exp_TimeDART(Exp_Basic):
 
         return vali_loss
 
-    def test(self):
+    def test(self,settings=None,test=0):
         test_data, test_loader = self._get_data(flag="test")
+        path = os.path.join(self.args.checkpoints, settings)
+        path = path + '_dln_' + str(self.args.denoise_layers_num)
+        output_dir = os.path.join(self.project_path, 'outputs/npz_results')
+        npz_folder_path = os.path.join(output_dir, settings)  # 使用具体的字符串属性
+        if not os.path.exists(npz_folder_path):
+            os.makedirs(npz_folder_path)
+        if test:
+            print('loading model')
+            ckpt_best = os.path.join(path, 'ckpt_best.pth')
+            ckpt_default = os.path.join(path, 'checkpoint.pth')
+            checkpoint_path = ckpt_best if os.path.exists(ckpt_best) else ckpt_default
+
+            if os.path.exists(checkpoint_path):
+                # 统一从cpu加载，避免显存/设备不一致问题；模型本身在外面再to(device)
+                try:
+                    load_checkpoint_compat(
+                        model=self.model,
+                        checkpoint_path=checkpoint_path,
+                        map_location="cpu",
+                        verbose=True
+                    )
+                except Exception as e:
+                    print("[load_checkpoint_compat] 失败，降级为 strict=False 直接加载:", e)
+                    # 兜底：直接尝试 strict=False（不做形状自适配）
+                    ckpt_obj = torch.load(checkpoint_path, map_location="cpu")
+                    raw_sd = _extract_model_state_dict(ckpt_obj)
+                    raw_sd = _strip_module_prefix(raw_sd)
+                    self.model.load_state_dict(raw_sd, strict=False)
+            else:
+                print(f"[warn] 找不到 checkpoint 文件: {checkpoint_path}")
+            print("load success")
 
         preds = []
         trues = []
 
         folder_path = "./outputs/test_results/{}".format(self.args.data)
         folder_path = folder_path + '_dln_' + str(self.args.denoise_layers_num)
+
+        # result save
+        # npz_folder_path = os.path.join(self.project_path+ os.sep +'outputs' + os.sep, self.args)
+
+        output_dir = os.path.join(self.project_path, 'outputs/npz_results')
+        npz_folder_path = os.path.join(output_dir, settings)  # 使用具体的字符串属性
+
+
+        if not os.path.exists(npz_folder_path):
+            os.makedirs(npz_folder_path)
+
+
         if not os.path.exists(folder_path):
             os.makedirs(folder_path)
         infer_start = time.time()
@@ -864,7 +976,7 @@ class Exp_TimeDART(Exp_Basic):
         f = open(folder_path + "/score.txt", "a")
         from datetime import datetime
         params_str = self.train_count_params(self.args)
-        f.write('params:{}'.format(params_str) + "  \n")
+        # f.write('params:{}'.format(params_str) + "  \n")
 
         # 获取当前时间
         now = datetime.now()
@@ -873,13 +985,13 @@ class Exp_TimeDART(Exp_Basic):
         formatted_time = now.strftime("%Y-%m-%d %H:%M:%S")
         # print("当前时间:", formatted_time)
         f.write(
-            "{0}->{1}, {2:.3f}, {3:.3f},{4},{5},{6},{7},log_var_orth={8},log_var_season_freq={9},log_var_freq={10},use_loss_compute={11},use_new_decomp={12},use_denoise={13},log_var_season_freq={14} \n".format(
+            "{0}->{1}, {2:.3f}, {3:.3f},{4},{5},{6},{7},log_var_orth={8},log_var_season_freq={9},log_var_freq={10},use_loss_compute={11},use_new_decomp={12},use_denoise={13},log_var_season_freq={14},params={15} \n".format(
                 self.args.input_len, self.args.pred_len, mse, mae,formatted_time,self.args.d_model,
                 self.args.batch_size,self.args.n_heads,self.args.log_var_orth,self.args.log_var_season_freq,
                 self.args.log_var_freq,
-                self.args.use_loss_compute,self.args.use_new_decomp,self.args.use_denoise,self.args.use_inner_new_decomp))
+                self.args.use_loss_compute,self.args.use_new_decomp,self.args.use_denoise,self.args.use_inner_new_decomp,params_str))
         f.close()
-        np.save(folder_path+os.sep+ 'metrics.npy', np.array([mae, mse, rmse, mape, mspe]))
-        np.save(folder_path+os.sep+'pred.npy', preds)
-        np.save(folder_path +os.sep+'true.npy', trues)
+        np.save(npz_folder_path+os.sep+ 'metrics.npy', np.array([mae, mse, rmse, mape, mspe]))
+        np.save(npz_folder_path+os.sep+'pred.npy', preds)
+        np.save(npz_folder_path +os.sep+'true.npy', trues)
         return

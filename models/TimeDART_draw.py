@@ -1244,16 +1244,69 @@ def plot_line_charts(tensors, titles=None,layer_idx=0,path='',name='0.jpg'):
 
         # 优化可视化元素
         plt.grid(True, alpha=0.3)
-        plt.title(titles[idx] if titles else f'Tensor {idx + 1}', fontsize=12)
-        plt.xlabel('Time Step', fontsize=10)
-        plt.ylabel('Feature Value', fontsize=10)
-        plt.xticks(rotation=45)  # 横坐标标签旋转防重叠
+        plt.title(titles[idx] if titles else f'Tensor {idx + 1}', fontsize=16)
+        plt.xlabel('Time Step', fontsize=14)
+        plt.ylabel('Feature Value', fontsize=14)
+        plt.xticks()  # 横坐标标签旋转防重叠
 
     # 增强布局紧凑性
     plt.tight_layout(pad=2.0)
     plt.savefig(path + os.sep + name+str(layer_idx)+'.png', dpi=300, bbox_inches='tight')
     plt.close()  # 防止内存泄漏
 
+import os
+import matplotlib.pyplot as plt
+
+# 字体大小配置
+FONTSIZE_BASE   = 16  # 基础字号（可以不用也行，看你后面要不要统一用）
+FONTSIZE_LABEL  = 18  # 坐标轴标签字号
+FONTSIZE_TITLE  = 20  # 图标题字号
+FONTSIZE_TICK   = 14  # 坐标轴刻度字号
+FONTSIZE_LEGEND = 14  # 图例字号（目前函数里没用到图例，预留）
+
+def plot_line_charts(tensors, titles=None, layer_idx=0, path='', name='0'):
+    """
+    绘制多个张量的折线图（横向排列）
+    参数：
+        tensors : 包含PyTorch张量的列表
+        titles  : 可选，每个子图的标题列表
+    """
+    if not os.path.exists(path):
+        os.makedirs(path)
+
+    # 调整画布尺寸为宽幅横向布局
+    plt.figure(figsize=(5 * len(tensors), 5))  # 宽度按子图数量扩展
+
+    for idx, tensor in enumerate(tensors):
+        # 转换张量到CPU并转为numpy
+        arr = tensor.detach().cpu().numpy()  # 统一处理设备转移
+
+        # 创建横向排列的子图 (1行N列)
+        plt.subplot(1, len(tensors), idx + 1)
+
+        # 绘制特定维度的数据（根据需求调整切片）
+        # 示例：取最后一个样本的最后一列特征
+        plt.plot(arr[-1, :, -1], linewidth=2)
+
+        # 坐标轴刻度字号
+        plt.tick_params(axis='both', labelsize=FONTSIZE_TICK)
+
+        # 网格与标题、坐标轴标签
+        plt.grid(True, alpha=0.3)
+        plt.title(
+            titles[idx] if titles else f'Tensor {idx + 1}',
+            fontsize=FONTSIZE_TITLE
+        )
+        plt.xlabel('Time Step', fontsize=FONTSIZE_LABEL)
+        plt.ylabel('Feature Value', fontsize=FONTSIZE_LABEL)
+
+    # 增强布局紧凑性
+    plt.tight_layout(pad=2.0)
+
+    # 注意：这里我让 name 当成“前缀”，自动加上 layer_idx 和 .png
+    save_path = os.path.join(path, f'{name}_layer{layer_idx}.png')
+    plt.savefig(path + os.sep + name+str(layer_idx)+'.png', dpi=300, bbox_inches='tight')
+    plt.close()  # 防止内存泄漏
 
 def analyze_components(original, trend, seasonal,chunk=25):
     import pandas as pd

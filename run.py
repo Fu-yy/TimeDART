@@ -236,9 +236,6 @@ parser.add_argument('--use_loss_compute', type=int, help='use_loss_compute', def
 
 
 
-parser.add_argument('--distance', type=int, help='distance', default=10)
-
-
 
 
 
@@ -251,7 +248,7 @@ parser.add_argument('--mask_block', type=int , help='mask_block', default=13)
 parser.add_argument('--use_t_embed', type=int , help='use_t_embed', default=1)
 parser.add_argument('--use_init_loss_pretrain', type=int , help='use_init_loss_pretrain', default=0)
 parser.add_argument('--use_init_loss_finetune', type=int , help='use_init_loss_finetune', default=1)
-parser.add_argument('--use_geo_mask', type=int , help='use_geo_mask', default=1)
+parser.add_argument('--use_geo_mask', type=int , help='use_geo_mask', default=0)
 parser.add_argument('--use_film_in_ft', type=int , help='use_film_in_ft', default=1)
 parser.add_argument('--pretrained_backbone', type=int , help='pretrained_backbone', default=1)
 parser.add_argument('--pretrain_noise', type=str , help='mask or tembed', default='mask')
@@ -259,13 +256,19 @@ parser.add_argument('--predict_eps', type=int, help='predict_eps', default=1)
 parser.add_argument('--use_refine_in_ft', type=int, help='use_refine_in_ft', default=0)
 parser.add_argument('--use_pretrain_in_ft', type=int, help='use_pretrain_in_ft', default=1)
 parser.add_argument('--film_mode', type=str, help='film_mode', default='full')
-parser.add_argument('--destroy_season', type=int, help='destroy_season', default=1)
+parser.add_argument('--destroy_mode', type=str, help='destroy_mode', default='season')
 parser.add_argument('--use_film', type=int, help='use_film', default=1)
 parser.add_argument('--use_finetune_encoder', type=int, help='use_finetune_encoder', default=1)
 parser.add_argument('--use_pretrain_encoder', type=int, help='use_pretrain_encoder', default=1)
 parser.add_argument('--max_lag', type=int, help='max_lag', default=63)
 parser.add_argument('--num_scales', type=int, help='num_scales', default=4)
 parser.add_argument('--peak_threshold', type=float, help='peak_threshold', default=0.3)
+parser.add_argument('--distance', type=int, help='distance', default=10)
+
+
+parser.add_argument('--not_context', type=int, help='peak_threshold', default=0)
+parser.add_argument('--not_cond', type=int, help='peak_threshold', default=0)
+parser.add_argument('--no_film', type=int, help='no_film', default=0)
 
 
 
@@ -355,12 +358,12 @@ elif args.task_name == "finetune":
         args.load_checkpoints = os.path.join(
             args.pretrain_checkpoints, args.data + '_dln_' + str(args.denoise_layers_num), args.transfer_checkpoints
         )
-
+        args.load_checkpoints = None
         exp = Exp(args)  # set experiments
 
         print(">>>>>>>start training : {}>>>>>>>>>>>>>>>>>>>>>>>>>>".format(setting))
         exp.train(setting)
 
         print(">>>>>>>testing : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<".format(setting))
-        exp.test()
+        exp.test(setting)
         torch.cuda.empty_cache()
