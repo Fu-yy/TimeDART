@@ -241,7 +241,7 @@ parser.add_argument('--use_loss_compute', type=int, help='use_loss_compute', def
 
 
 # 2025-09-25 17:24:26 两种模式
-parser.add_argument('--pretrain_mode', type=str , help='mask or noise', default='mask')
+# parser.add_argument('--pretrain_mode', type=str , help='mask or noise', default='mask')
 parser.add_argument('--freeze_decomp_in_pretrain', type=int , help='A or B', default=1)
 parser.add_argument('--mask_ratio', type=float , help='mask_ratio', default=0.5)
 parser.add_argument('--mask_block', type=int , help='mask_block', default=13)
@@ -270,11 +270,88 @@ parser.add_argument('--not_context', type=int, help='peak_threshold', default=0)
 parser.add_argument('--not_cond', type=int, help='peak_threshold', default=0)
 parser.add_argument('--no_film', type=int, help='no_film', default=0)
 
+# 消融--icml 2026-03-26 09:12:19
+parser.add_argument('--use_trend_context_pretrain', type=int, help='use_trend_context_pretrain ', default=1)
+parser.add_argument('--use_trend_context_denoiser', type=int, help='use_trend_context_denoiser  ', default=1)
+parser.add_argument('--use_trend_context_finetune', type=int, help='use_trend_context_finetune   ', default=1)
+parser.add_argument('--trend_context_mode', type=str, help='trend_context_mode,true,shuffle,noise', default='true')
+
+# =========================
+# Rebuttal Experiments
+# =========================
+parser.add_argument('--rebuttal_exp', type=str, default='none',
+                    choices=['none', 'somr', 'sodd', 'joint', 'decomp_clean', 'decomp_gaussian', 'decomp_shift'],
+                    help='which rebuttal experiment to run')
+
+# Experiment 2: SOMR / SODD / Joint
+# parser.add_argument('--pretrain_mode', type=str, default='mask',
+#                     choices=['mask', 'noise', 'joint'])
+parser.add_argument('--joint_loss_weight_mask', type=float, default=1.0)
+parser.add_argument('--joint_loss_weight_noise', type=float, default=1.0)
+
+# Experiment 5: decomp error -> TCSE
+parser.add_argument('--decomp_error_mode', type=str, default='none',
+                    choices=['none', 'gaussian', 'shift', 'scale', 'shuffle'])
+# parser.add_argument('--decomp_error_std', type=float, default=0.1)
+parser.add_argument('--decomp_shift_steps', type=int, default=4)
+parser.add_argument('--decomp_scale_factor', type=float, default=1.2)
+parser.add_argument('--apply_decomp_error_in_pretrain', type=int, default=0)
+parser.add_argument('--apply_decomp_error_in_finetune', type=int, default=0)
+parser.add_argument('--decomp_error_affect_head', type=int, default=0)
+parser.add_argument('--seeds', type=int, default=0)
 
 
+
+
+
+
+
+
+
+
+###############2026-03-28 20:16:02消融
+
+# ========= joint SOMR + SODD =========
+parser.add_argument('--pretrain_mode', type=str, default='mask',
+                    help='mask / noise / joint')
+parser.add_argument('--joint_mask_weight', type=float, default=1.0)
+parser.add_argument('--joint_noise_weight', type=float, default=1.0)
+
+# ========= decomposition error experiment =========
+parser.add_argument('--enable_decomp_error_exp', type=int, default=0)
+parser.add_argument('--decomp_error_phase', type=str, default='finetune',
+                    help='pretrain / finetune / both')
+parser.add_argument('--decomp_error_type', type=str, default='gaussian',
+                    help='gaussian / shuffle / scale_bias')
+parser.add_argument('--decomp_error_std', type=float, default=0.05)
+parser.add_argument('--decomp_error_scale', type=float, default=0.2)
+parser.add_argument('--decomp_error_bias', type=float, default=0.0)
+
+# ========= smoother replacement =========
+parser.add_argument('--smoother_variant', type=str, default='learnable',
+                    help='learnable / ma95 / ema / dwconv / none')
+parser.add_argument('--ema_alpha', type=float, default=0.3)
+parser.add_argument('--conv_kernel', type=int, default=25)
 
 
 args = parser.parse_args()
+
+
+
+
+
+
+
+
+print("========== Final Rebuttal Config ==========")
+for k, v in sorted(vars(args).items()):
+    print(f"{k}: {v}")
+print("==========================================")
+
+
+
+
+
 args.use_gpu = True if torch.cuda.is_available() and args.use_gpu else False
 a = torch.cuda.is_available()
 if args.use_gpu and args.use_multi_gpu:
@@ -358,7 +435,7 @@ elif args.task_name == "finetune":
         args.load_checkpoints = os.path.join(
             args.pretrain_checkpoints, args.data + '_dln_' + str(args.denoise_layers_num), args.transfer_checkpoints
         )
-        args.load_checkpoints = None
+        # args.load_checkpoints = None
         exp = Exp(args)  # set experiments
 
         print(">>>>>>>start training : {}>>>>>>>>>>>>>>>>>>>>>>>>>>".format(setting))

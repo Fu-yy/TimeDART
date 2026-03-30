@@ -641,10 +641,10 @@ class StableCondDenoiser(nn.Module):
         return x
 class TransformerEncoderBlock(nn.Module):
     def __init__(
-        self, configs,d_model: int, num_heads: int, feedforward_dim: int, dropout: float
+        self, d_model: int, num_heads: int, feedforward_dim: int, dropout: float
     ):
         super(TransformerEncoderBlock, self).__init__()
-        self.configs=configs
+
         self.attention = nn.MultiheadAttention(
             embed_dim=d_model, num_heads=num_heads, dropout=dropout, batch_first=True
         )
@@ -670,23 +670,13 @@ class TransformerEncoderBlock(nn.Module):
         :param mask: [1, 1, seq_len, seq_len]
         :return: [batch_size * num_features, seq_len, d_model]
         """
+        # Self-attention
+        attn_output, _ = self.attention(x, x, x, attn_mask=mask)
+        x = self.norm1(x + self.dropout(attn_output))
 
-        if self.configs.no_film != 1:
-            # Self-attention
-            attn_output, _ = self.attention(x, x, x, attn_mask=mask)
-            x = self.norm1(x + self.dropout(attn_output))
-
-            if cond is not None:
-                cross_x,_ = self.attention_cross(x, cond, x, attn_mask=mask)
-                x = self.norm1(x + self.dropout(cross_x))
-
-            # Self-attention
-            attn_output, _ = self.attention(x, x, x, attn_mask=mask)
-            x = self.norm1(x + self.dropout(attn_output))
-        else:
-            # Self-attention
-            attn_output, _ = self.attention(x, x, x, attn_mask=mask)
-            x = self.norm1(x + self.dropout(attn_output))
+        if cond is not None:
+            cross_x,_ = self.attention_cross(x, cond, x, attn_mask=mask)
+            x = self.norm1(x + self.dropout(cross_x))
 
         # Feed-forward network
         ff_output = self.ff(x)
@@ -698,24 +688,22 @@ class TransformerEncoderBlock(nn.Module):
 class CausalTransformer(nn.Module):
     def __init__(
         self,
-            configs,
         d_model: int,
         num_heads: int,
         num_layers: int,
         feedforward_dim: int,
         dropout: float,
-
     ):
         super(CausalTransformer, self).__init__()
         # 1. 定义那个 "长度为1的 parameter"
         # 这就是你的 [Trend] Token，类似 BERT 的 [CLS]
         self.trend_token = nn.Parameter(torch.randn(1, 1, d_model))
-        self.configs=configs
+
         # 2. Cross-Attention: 让 Token 去读 Trend 序列
         self.cross_attn = nn.MultiheadAttention(d_model, num_heads, dropout=dropout, batch_first=True)
         self.layers = nn.ModuleList(
             [
-                TransformerEncoderBlock(configs,d_model, num_heads, feedforward_dim, dropout)
+                TransformerEncoderBlock(d_model, num_heads, feedforward_dim, dropout)
                 for _ in range(num_layers)
             ]
         )
@@ -730,19 +718,13 @@ class CausalTransformer(nn.Module):
         seq_len = x.size(1)
 
         B = x.shape[0]
-
-
         if context is not None:
-
             # h = torch.cat([x, context], dim=-1)
-            h = x + context
-            if self.configs.no_film != 1:
-                gamma_beta = self.film(h)
-                gamma, beta = gamma_beta.chunk(2, dim=-1)
-                q = (1.0 + 0.5 * torch.tanh(gamma)) * x + 0.5 * torch.tanh(beta)
-                q = q + h
-            else:
-                q=h
+            h = x+ context
+            gamma_beta = self.film(h)
+            gamma, beta = gamma_beta.chunk(2, dim=-1)
+            q = (1.0 + 0.5 * torch.tanh(gamma)) * x + 0.5 * torch.tanh(beta)
+            q = q + h
             # --- Step 1: 学习 Trend 信息 (Summary) ---
             # 扩展 token 到 batch 大小: [B, 1, D]
             # token = self.trend_token.expand(B, -1, -1)
@@ -758,8 +740,7 @@ class CausalTransformer(nn.Module):
             # --- Step 2: 拼接 (Prompt Injection) ---
             # 把 Summary 拼在 Noisy Input 前面 -> [B, 1+S, D]
             # combined_input = torch.cat([trend_summary, x], dim=1)
-            combined_input = trend_summary + x
-
+            combined_input = trend_summary+x
         else:
             combined_input=x
         mask = generate_causal_mask(seq_len).to(x.device) if is_mask else None
@@ -772,7 +753,68 @@ class CausalTransformer(nn.Module):
         return x
 
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
+
+class EMADecomp(nn.Module):
+    """
+    只替换 smoother，不改你的整体结构。
+    输入: x [B, L, C]
+    输出: seasonal, trend
+    """
+    def __init__(self, alpha=0.3):
+        super().__init__()
+        self.alpha = alpha
+
+    def forward(self, x):
+        # x: [B, L, C]
+        B, L, C = x.shape
+        trend = torch.zeros_like(x)
+        trend[:, 0, :] = x[:, 0, :]
+        alpha = self.alpha
+
+        for t in range(1, L):
+            trend[:, t, :] = alpha * x[:, t, :] + (1.0 - alpha) * trend[:, t - 1, :]
+
+        seasonal = x - trend
+        return seasonal, trend
+
+
+class DWConvDecomp(nn.Module):
+    """
+    depthwise conv smoother
+    只作为 smoother replacement 实验，不改变主结构
+    """
+    def __init__(self, channels, kernel_size=25):
+        super().__init__()
+        assert kernel_size % 2 == 1, "conv smoother 的 kernel_size 建议设为奇数"
+        self.channels = channels
+        self.kernel_size = kernel_size
+        self.pad = kernel_size // 2
+
+        self.dw_conv = nn.Conv1d(
+            in_channels=channels,
+            out_channels=channels,
+            kernel_size=kernel_size,
+            groups=channels,
+            bias=False,
+            padding=0
+        )
+
+        # 初始化为均值平滑核
+        with torch.no_grad():
+            w = torch.ones(channels, 1, kernel_size) / kernel_size
+            self.dw_conv.weight.copy_(w)
+
+    def forward(self, x):
+        # x: [B, L, C]
+        x_c = x.permute(0, 2, 1)  # [B, C, L]
+        x_pad = F.pad(x_c, (self.pad, self.pad), mode='replicate')
+        trend = self.dw_conv(x_pad).permute(0, 2, 1)  # [B, L, C]
+        seasonal = x - trend
+        return seasonal, trend
 class Model(nn.Module):
     """
     TimeDART
@@ -837,7 +879,6 @@ class Model(nn.Module):
         )
         self.encoder = CausalTransformer(
             d_model=configs.d_model,
-            configs=configs,
             num_heads=configs.n_heads,
             feedforward_dim=configs.d_ff,
             dropout=configs.dropout,
@@ -948,6 +989,107 @@ class Model(nn.Module):
 
 
 
+        # =========================
+        # [NEW] Joint SOMR + SODD
+        # =========================
+        self.pretrain_mode = getattr(configs, 'pretrain_mode', 'mask')  # 'mask' / 'noise' / 'joint'
+        self.joint_mask_weight = getattr(configs, 'joint_mask_weight', 1.0)
+        self.joint_noise_weight = getattr(configs, 'joint_noise_weight', 1.0)
+
+        # =========================
+        # [NEW] decomposition error experiment
+        # =========================
+        self.enable_decomp_error_exp = getattr(configs, 'enable_decomp_error_exp', 0)
+        self.decomp_error_phase = getattr(configs, 'decomp_error_phase', 'finetune')  # 'pretrain' / 'finetune' / 'both'
+        self.decomp_error_type = getattr(configs, 'decomp_error_type', 'gaussian')     # 'gaussian' / 'shuffle' / 'scale_bias'
+        self.decomp_error_std = getattr(configs, 'decomp_error_std', 0.05)
+        self.decomp_error_scale = getattr(configs, 'decomp_error_scale', 0.2)
+        self.decomp_error_bias = getattr(configs, 'decomp_error_bias', 0.0)
+
+        # =========================
+        # [NEW] smoother replacement
+        # =========================
+        self.smoother_variant = getattr(configs, 'smoother_variant', 'learnable')
+        # 可选: 'learnable' / 'ma95' / 'ema' / 'dwconv' / 'none'
+        self.ema_alpha = getattr(configs, 'ema_alpha', 0.3)
+        self.conv_kernel = getattr(configs, 'conv_kernel', 25)
+
+        self.decomp_ema = EMADecomp(alpha=self.ema_alpha)
+        self.decomp_dwconv = DWConvDecomp(channels=self.configs.c_out, kernel_size=self.conv_kernel)
+
+    def _zeros_on_x(self, x):
+        z = x.new_tensor(0.0)
+        return z, z, z, z, z
+
+    def _run_decomp(self, x):
+        """
+        统一管理分解器，便于 smoother replacement 实验
+        返回:
+            seasonal, trend, freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss
+        """
+        if self.smoother_variant == 'learnable':
+            # 你原来的 learnable multi-scale decomp
+            seasonal, trend, freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss = self.decomp_multi_learnable(
+                x)
+            return seasonal, trend, freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss
+
+        elif self.smoother_variant == 'ma95':
+            seasonal, trend = self.decomp_multi(x)
+            freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss = self._zeros_on_x(x)
+            return seasonal, trend, freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss
+
+        elif self.smoother_variant == 'ema':
+            seasonal, trend = self.decomp_ema(x)
+            freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss = self._zeros_on_x(x)
+            return seasonal, trend, freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss
+
+        elif self.smoother_variant == 'dwconv':
+            seasonal, trend = self.decomp_dwconv(x)
+            freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss = self._zeros_on_x(x)
+            return seasonal, trend, freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss
+
+        elif self.smoother_variant == 'none':
+            seasonal, trend = x, x
+            freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss = self._zeros_on_x(x)
+            return seasonal, trend, freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss
+
+        else:
+            raise ValueError(f"Unknown smoother_variant: {self.smoother_variant}")
+
+    def _apply_decomp_error(self, trend, phase='finetune'):
+        """
+        decomposition error 实验：
+        对 trend 人为注入误差，测试后续 TCSE 和 forecasting 的鲁棒性
+        """
+        if self.enable_decomp_error_exp != 1:
+            return trend
+
+        if self.decomp_error_phase not in [phase, 'both']:
+            return trend
+
+        if self.decomp_error_type == 'gaussian':
+            # 按趋势自身尺度注入噪声
+            trend_std = trend.std(dim=1, keepdim=True, unbiased=False).detach()
+            noise = torch.randn_like(trend) * (self.decomp_error_std * (trend_std + 1e-6))
+            trend_bad = trend + noise
+            return trend_bad
+
+        elif self.decomp_error_type == 'shuffle':
+            # 打乱时间顺序，模拟分解失真
+            B, L, C = trend.shape
+            idx = torch.randperm(L, device=trend.device)
+            trend_bad = trend[:, idx, :]
+            return trend_bad
+
+        elif self.decomp_error_type == 'scale_bias':
+            trend_bad = trend * (1.0 + self.decomp_error_scale) + self.decomp_error_bias
+            return trend_bad
+
+        else:
+            raise ValueError(f"Unknown decomp_error_type: {self.decomp_error_type}")
+
+
+
     def init_adaptive_weights(self, sample_batch):
         """ 用样本数据初始化自适应权重 """
         with torch.no_grad():
@@ -960,370 +1102,280 @@ class Model(nn.Module):
             self.log_var_season_freq.data = season_freq_loss + 1e-8
             self.log_var_recon.data = recon_loss + 1e-8
 
-    def pretrain(self, x,x_mask,i=0):
-
-        # [batch_size, input_len, num_features]
-        # Instance Normalization
-
-        # x = torch.fft.fft(x,dim=-2).real
-        mask_rate = 0.5
-        lm=3
-        positive_nums=1
-        e_x =x
+    def _pretrain_once(self, x, x_mask, i=0, mode='mask'):
         device = x.device
         batch_size, input_len, num_features = x.size()
-        means = torch.mean(
-            x, dim=1, keepdim=True
-        ).detach()  # [batch_size, 1, num_features], detach from gradient
-        x = x - means  # [batch_size, input_len, num_features]
-        stdevs = torch.sqrt(
-            torch.var(x, dim=1, keepdim=True, unbiased=False) + 1e-5
-        ).detach()  # [batch_size, 1, num_features]
-        x = x / stdevs  # [batch_size, input_len, num_features]
-        # x = self.inverse_embedding(x.permute(0,2,1)).permute(0,2,1)
-        # 分解  1
-        B, L, C = x.shape  # 此时 x 是 seasonal，trend 是趋势
-        if self.configs.use_new_decomp == 1:
-            seasonal ,trend,freq_loss,orth_loss,smoothness,season_freq_loss,recon_loss = self.decomp_multi_learnable(x)
-        elif self.configs.use_new_decomp == 2:
-            seasonal, trend = x,x
 
-            freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss = torch.tensor(0.0), torch.tensor(0.0), torch.tensor(0.0), torch.tensor(0.0),torch.tensor(0.0)
+        means = torch.mean(x, dim=1, keepdim=True).detach()
+        x = x - means
+        stdevs = torch.sqrt(torch.var(x, dim=1, keepdim=True, unbiased=False) + 1e-5).detach()
+        x = x / stdevs
 
-        else:
-            seasonal, trend = self.decomp_multi(x)
-            freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss = torch.tensor(0.0), torch.tensor(0.0), torch.tensor(0.0), torch.tensor(0.0),torch.tensor(0.0)
-        if self.configs.pretrain_mode == 'mask':
+        B, L, C = x.shape
+
+        # ========= decomposition =========
+        seasonal, trend, freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss = self._run_decomp(x)
+
+        # decomposition error experiment
+        trend = self._apply_decomp_error(trend, phase='pretrain')
+
+        M = None
+        eps = None
+
+        # ========= corruption =========
+        if mode == 'mask':
             if self.configs.use_geo_mask:
-                # 在 pretrain_B 内部、拿到 seasonal/trend 之后：
                 M = geometric_block_mask_torch(
                     B, L, C,
                     masking_ratio=self.configs.mask_ratio,
                     lm=self.configs.mask_block,
                     shared_channels=True,
                     device=x.device
-                )  # [B,L,C], True=遮盖
+                )
                 if self.configs.destroy_mode == 'season':
-                    seasonal_tilde = torch.where(M, torch.zeros_like(seasonal), seasonal)  # 被遮盖处=0
-                    x_tilde = trend + seasonal_tilde
+                    seasonal_tilde = torch.where(M, torch.zeros_like(seasonal), seasonal)
                     x_tilde = seasonal_tilde
                 elif self.configs.destroy_mode == 'trend':
-                    trend_tilde = torch.where(M, torch.zeros_like(trend), trend)  # 被遮盖处=0
+                    trend_tilde = torch.where(M, torch.zeros_like(trend), trend)
                     x_tilde = trend_tilde + seasonal
                 elif self.configs.destroy_mode == 'x':
-                    x_tilde = torch.where(M, torch.zeros_like(x), x)  # 被遮盖处=0
+                    x_tilde = torch.where(M, torch.zeros_like(x), x)
+                else:
+                    x_tilde = seasonal + trend
             else:
-                M = block_mask_torch(B, L, C, masking_ratio=self.configs.mask_ratio, block=self.configs.mask_block,
-                                     shared_channels=True, variable_block=True, device=x.device)
+                M = block_mask_torch(
+                    B, L, C,
+                    masking_ratio=self.configs.mask_ratio,
+                    block=self.configs.mask_block,
+                    shared_channels=True,
+                    variable_block=True,
+                    device=x.device
+                )
                 if self.configs.destroy_mode == 'season':
-
-                    # c = M.mean()
                     seasonal_tilde = seasonal.masked_fill(M, 0.0)
-                    # d = seasonal_tilde.mean()
-                    x_tilde = trend + seasonal_tilde
                     x_tilde = seasonal_tilde
                 elif self.configs.destroy_mode == 'trend':
                     trend_tilde = trend.masked_fill(M, 0.0)
                     x_tilde = trend_tilde + seasonal
                 elif self.configs.destroy_mode == 'x':
                     x_tilde = x.masked_fill(M, 0.0)
-        elif self.configs.pretrain_mode == 'noise':
-            # -------- 对季节项加扩散噪声（时间域）--------
-            # 采样一个 t（也可 token 级），这里用样本级标量 t
-            t = self.diffusion.sample_time_steps((B,))  # [B]
-            # 广播到 [B,L,C]
-            gamma_t = self.diffusion.gamma[t].view(B, 1, 1).to(device)
-            if self.configs.destroy_mode == 'season':
+                else:
+                    x_tilde = seasonal + trend
 
+        elif mode == 'noise':
+            t = self.diffusion.sample_time_steps((B,))
+            gamma_t = self.diffusion.gamma[t].view(B, 1, 1).to(device)
+
+            if self.configs.destroy_mode == 'season':
                 eps = torch.randn_like(seasonal)
                 noisy_seasonal = torch.sqrt(gamma_t) * seasonal + torch.sqrt(1 - gamma_t) * eps
-                # x_tilde = trend + noisy_seasonal  # 只对 seasonal 加噪，趋势保真
-                x_tilde = noisy_seasonal  # 只对 seasonal 加噪，趋势保真
+                x_tilde = noisy_seasonal
             elif self.configs.destroy_mode == 'trend':
                 eps = torch.randn_like(trend)
                 noisy_trend = torch.sqrt(gamma_t) * trend + torch.sqrt(1 - gamma_t) * eps
-                x_tilde = seasonal + noisy_trend  # 只对 seasonal 加噪，趋势保真
+                x_tilde = seasonal + noisy_trend
             elif self.configs.destroy_mode == 'x':
                 eps = torch.randn_like(x)
-                x_tilde = torch.sqrt(gamma_t) * trend + torch.sqrt(1 - gamma_t) * eps
-
+                x_tilde = torch.sqrt(gamma_t) * x + torch.sqrt(1 - gamma_t) * eps
+            else:
+                x_tilde = seasonal + trend
         else:
-            x_tilde = seasonal+trend
-        # -------- 编码为 patch 表征 --------
-        x_ci = self.channel_independence[0](x_tilde)  # [B*C, L, 1]
-        x_patch = self.patch(x_ci)  # [B*C, S, P]
-        x_emb = self.enc_embedding(x_patch)  # [B*C, S, D]
+            raise ValueError(f"Unknown pretrain mode: {mode}")
 
-
+        # ========= encode =========
+        x_ci = self.channel_independence[0](x_tilde)
+        x_patch = self.patch(x_ci)
+        x_emb = self.enc_embedding(x_patch)
 
         if self.configs.use_sostoken == 1:
-            x_embedding_bias = self.add_sos_token_and_drop_last(
-                x_emb
-            )  # [batch_size * num_features, seq_len, d_model]
+            x_embedding_bias = self.add_sos_token_and_drop_last(x_emb)
         else:
+            x_embedding_bias = x_emb
 
-            x_embedding_bias=x_emb
         if self.configs.use_positional_encoding == 1:
-
             x_embedding_bias = self.positional_encoding(x_embedding_bias)
 
-        else:
-            x_embedding_bias = x_embedding_bias
+        trend_ci = self.channel_independence[0](trend)
+        trend_patch = self.patch(trend_ci)
+        trend_emb = self.enc_embedding_trend(trend_patch)
 
-
-        # -------- trend 条件编码（时间域 -> D，广播到序列）--------
-        if self.configs.use_new_decomp != 2:
-
-            trend_ci = self.channel_independence[0](trend)  # [B*C, L, 1]
-            trend_patch = self.patch(trend_ci)  # [B*C, S, P]
-            trend_emb = self.enc_embedding_trend(trend_patch)
-
-        # 分解  2
-        # x_embedding_bias, _ = self.decomp_multi(x_embedding_bias)
-        # x_embedding_bias, _ = x_embedding_bias,x_embedding_
         if self.configs.use_pretrain_encoder == 1:
-            if self.configs.use_new_decomp != 2:
-                x_emb  = self.encoder(
-                    x_embedding_bias,
-                    context=trend_emb,
-                    is_mask=False,
-                )  # [batch_size * num_features, seq_len, d_model]
-            else:
-                x_emb = self.encoder(
-                    x_embedding_bias,
-                    context=None,
-                    is_mask=False,
-                )  # [batch_size * num_features, seq_len, d_model]
+            x_emb = self.encoder(
+                x_embedding_bias,
+                context=trend_emb,
+                is_mask=False,
+            )
         else:
-            x_emb=x_embedding_bias
-        # 获取总去噪层数和扩散模型总时间步
+            x_emb = x_embedding_bias
 
-
-
-
-        # cond_trend = trend_emb  # [B, 1, D]
-
-        # -------- t-embedding（若启用）--------
-        if self.configs.pretrain_mode == 'noise':
-
+        # ========= t embedding =========
+        if mode == 'noise':
             if self.t_embed is not None:
-                # 把样本级 t 展开到序列
-                t_big = t.view(B, 1).repeat(1, x_emb.size(1))  # [B, S]
-                t_big = t_big.repeat_interleave(C, dim=0)  # [B*C, S]
-                t_emb = self.t_embed(t_big)  # [B*C, S, D]
+                t_big = t.view(B, 1).repeat(1, x_emb.size(1))
+                t_big = t_big.repeat_interleave(C, dim=0)
+                t_emb = self.t_embed(t_big)
             else:
                 t_emb = torch.zeros_like(x_emb)
         else:
             t_emb = torch.zeros_like(x_emb)
 
-        # -------- FiLM 条件 --------
-        # h = torch.cat([t_emb, cond_trend], dim=-1)  # [B*C, S, 2D]
-        # gamma = 1.0 + 0.1 * torch.tanh(self.cond_to_gamma(h))
-        # beta = 0.1 * torch.tanh(self.cond_to_beta(h))
-
-        # -------- FiLM 条件 --------
-
-
-
-        # 多层残差去噪
         feat = x_emb
         if getattr(self.configs, 'use_pretrain_in_ft', 0) == 1:
-        # if self.configs.pretrain_mode == 'noise':
-
-            # 还原 B 和 C
-            B_times_C, S, D = feat.shape
-            B, C = B, C  # 已在上文得到
-            # 1) 组装 cond（掩码重建：trend；扩散：trend + t）
-            if self.configs.pretrain_mode == 'noise':
-                cond_bc = trend_emb + t_emb  # [B*C, S, D]
+            if mode == 'noise':
+                cond_bc = trend_emb + t_emb
             else:
-                cond_bc = trend_emb  # [B*C, S, D]
-            cond_bc = self.cond_proj(cond_bc)  # 轻量对齐到同尺度
+                cond_bc = trend_emb
 
-            # 2) 选择 context（建议先用 trend_emb，当先验；可尝试 .detach() 更稳）
-            context_bc = trend_emb.detach()  # [B*C, S, D] 先验，不回传梯度
+            cond_bc = self.cond_proj(cond_bc)
+            context_bc = trend_emb.detach()
 
-            # 3) reshape 到 [B, S, D]，把通道当“batch 维中的子批次”
-            feat_bsd = feat.view(B, C * S, D)  # 合并通道到序列会破坏时序，不建议
-            # 正确方式：把通道“并回 batch”，对每个变量独立做注意力
-            feat_bsd = feat.view(B, C, S, D).reshape(B * C, S, D)  # 仍是 [B*C, S, D]
-            context_bsd = context_bc.view(B * C, S, D)
-            cond_bsd = cond_bc.view(B * C, S, D)
-
-            # 4) 稳定条件去噪（共享骨干）
             denoised_bsd = self.stable_denoiser(
-                noisy=x_emb,  # 被掩或加噪后的表征
-                context=context_bsd,  # 结构化先验（趋势或干净表征）
-                cond=None,  # 条件：trend (+ t)
+                noisy=x_emb,
+                context=context_bc,
+                cond=None,
                 key_padding_mask=None
-            )  # [B*C, S, D]
+            )
+            feat = denoised_bsd + x_emb
 
-            feat = denoised_bsd +x_emb   # 返回到 [B*C, S, D]
-            # feat = torch.cat([feat, x_emb],dim=-1)
-            # feat = self.cat_2(feat)
-        # --- 投影：直接回到 seasonal_hat（推荐）---
-
-        # === KL Loss 计算 ===
-        # 1. 投影得到分布参数
-        # feat 是经过 denoiser 之后的特征，或者用 x_emb (encoder输出) 也可以
-        # 建议对 encoder 的直接输出 x_emb 做约束
-        # mu_logvar = self.ib_projector(denoised_bsd)
-        # mu, logvar = mu_logvar.chunk(2, dim=-1)
-        #
-        # # 2. 计算 KL( q(z|x) || N(0,1) )
-        # # 公式: -0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
-        # kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-        # # 归一化 loss，除以 batch 和 seq_len，否则数值会太大
-        # kl_loss = kl_loss / (feat.shape[0] * feat.shape[1])
         kl_loss = 0.0
 
+        feat = feat.view(B, C, -1, self.d_model)
+        seasonal_hat = self.projection[0](feat)
 
-        feat = feat.view(B, C, -1, self.d_model)  # [B, C, S, D]
-        seasonal_hat = self.projection[0](feat)  # [B, L, C]
+        x_hat_norm = seasonal_hat + trend
+        x_clean_norm = seasonal + trend
 
-        if self.configs.use_new_decomp != 2:
-
-            # --- 只加一次 trend，得到 x_hat（归一化域）---
-            x_hat_norm = seasonal_hat + trend  # [B, L, C]
-            x_clean_norm = seasonal + trend  # 就是标准化后的 x
-        else:
-            # --- 只加一次 trend，得到 x_hat（归一化域）---
-            x_hat_norm = seasonal_hat   # [B, L, C]
-            x_clean_norm = seasonal   # 就是标准化后的 x
-
-        # ---------- 预训练损失 ----------
-        if self.configs.pretrain_mode == 'mask' and (M is not None):
+        # ========= loss =========
+        if mode == 'mask' and (M is not None):
             M_float = M.float()
             loss_rec = ((x_hat_norm - x_clean_norm) ** 2 * M_float).sum() / (M_float.sum() + 1e-6)
-        elif self.configs.pretrain_mode == 'noise':
+
+        elif mode == 'noise':
             if self.configs.predict_eps == 1:
                 loss_rec = F.mse_loss(seasonal_hat, eps)
             else:
                 loss_rec = F.mse_loss(x_hat_norm, x_clean_norm)
+
         else:
             loss_rec = F.mse_loss(x_hat_norm, x)
-        total_freq, total_orth, total_smooth, total_season_freq, total_recon_loss = freq_loss,orth_loss,smoothness,season_freq_loss,recon_loss
-        return loss_rec+ 0.02*kl_loss,total_freq,total_orth,total_smooth,total_season_freq,total_recon_loss
 
+        total_freq = freq_loss
+        total_orth = orth_loss
+        total_smooth = smoothness
+        total_season_freq = season_freq_loss
+        total_recon_loss = recon_loss
+
+        return loss_rec + 0.02 * kl_loss, total_freq, total_orth, total_smooth, total_season_freq, total_recon_loss
+
+    def pretrain(self, x, x_mask, i=0):
+        """
+        支持:
+        - mask
+        - noise
+        - joint
+        """
+        if self.pretrain_mode == 'joint':
+            loss_mask, freq_m, orth_m, smooth_m, sfreq_m, recon_m = self._pretrain_once(x, x_mask, i, mode='mask')
+            loss_noise, freq_n, orth_n, smooth_n, sfreq_n, recon_n = self._pretrain_once(x, x_mask, i, mode='noise')
+
+            total_loss = self.joint_mask_weight * loss_mask + self.joint_noise_weight * loss_noise
+
+            # 正则项/分解项这里取均值，保持接口不变
+            total_freq = 0.5 * (freq_m + freq_n)
+            total_orth = 0.5 * (orth_m + orth_n)
+            total_smooth = 0.5 * (smooth_m + smooth_n)
+            total_season_freq = 0.5 * (sfreq_m + sfreq_n)
+            total_recon_loss = 0.5 * (recon_m + recon_n)
+
+            return total_loss, total_freq, total_orth, total_smooth, total_season_freq, total_recon_loss
+
+        elif self.pretrain_mode == 'mask':
+            return self._pretrain_once(x, x_mask, i, mode='mask')
+
+        elif self.pretrain_mode == 'noise':
+            return self._pretrain_once(x, x_mask, i, mode='noise')
+
+        else:
+            raise ValueError("pretrain_mode should be 'mask', 'noise', or 'joint'")
     def forecast(self, x, x_mark):
-        # x = torch.fft.fft(x,dim=-2).real
-
         batch_size, _, num_features = x.size()
+
         means = torch.mean(x, dim=1, keepdim=True).detach()
         x = x - means
-        stdevs = torch.sqrt(
-            torch.var(x, dim=1, keepdim=True, unbiased=False) + 1e-5
-        ).detach()
+        stdevs = torch.sqrt(torch.var(x, dim=1, keepdim=True, unbiased=False) + 1e-5).detach()
         x = x / stdevs
-        # x, trend = self.decomp_multi(x)
-        # x = self.inverse_embedding(x.permute(0,2,1)).permute(0,2,1)
 
-        if self.configs.use_new_decomp == 1:
-            seasonal, trend, freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss = self.decomp_multi_learnable(x)
-        elif self.configs.use_new_decomp == 2:
-            seasonal, trend = x,x
-            freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss = torch.tensor(0.0), torch.tensor(
-                0.0), torch.tensor(0.0), torch.tensor(0.0), torch.tensor(0.0)
-        else:
-            seasonal, trend = self.decomp_multi(x)
-            freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss = torch.tensor(0.0), torch.tensor(
-                0.0), torch.tensor(0.0), torch.tensor(0.0), torch.tensor(0.0)
+        # ========= decomposition =========
+        seasonal, trend, freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss = self._run_decomp(x)
 
-        # x, trend = x,x
-        seasonal_ci = self.channel_independence[0](seasonal)  # [batch_size * num_features, input_len, 1]
-        seasonal_ci = self.patch(seasonal_ci)  # [batch_size * num_features, seq_len, patch_len]
+        # decomposition error experiment
+        trend = self._apply_decomp_error(trend, phase='finetune')
 
-        seasonal_emb = self.enc_embedding(seasonal_ci)  # [batch_size * num_features, seq_len, d_model]
+        seasonal_ci = self.channel_independence[0](seasonal)
+        seasonal_ci = self.patch(seasonal_ci)
+        seasonal_emb = self.enc_embedding(seasonal_ci)
 
         if self.configs.use_positional_encoding == 1:
-            seasonal_emb_pos = self.positional_encoding(seasonal_emb)  # [batch_size * num_features, seq_len, d_model]
+            seasonal_emb_pos = self.positional_encoding(seasonal_emb)
         else:
             seasonal_emb_pos = seasonal_emb
-        if self.configs.use_new_decomp != 2:
 
-            trend_ci = self.channel_independence[0](trend)  # [B*C, L, 1]
-            trend_patch = self.patch(trend_ci)  # [B*C, S, P]
-            trend_emb = self.enc_embedding_trend(trend_patch)
+        trend_ci = self.channel_independence[0](trend)
+        trend_patch = self.patch(trend_ci)
+        trend_emb = self.enc_embedding_trend(trend_patch)
 
         if self.configs.use_finetune_encoder == 1:
-            if self.configs.use_new_decomp != 2:
-
-                emb = self.encoder(
-                    seasonal_emb_pos,
-                    context=trend_emb,
-                    is_mask=False,
-                )  # [batch_size * num_features, seq_len, d_model]
-            else:
-                emb = self.encoder(
-                    seasonal_emb_pos,
-                    context=None,
-                    is_mask=False,
-                )  # [batch_size * num_features, seq_len, d_model]
-
-
+            emb = self.encoder(
+                seasonal_emb_pos,
+                context=trend_emb,
+                is_mask=False,
+            )
         else:
-            emb=seasonal_emb_pos
-        # 可选：FiLM
+            emb = seasonal_emb_pos
+
+        # 这里保留你原来的 FiLM 分支逻辑，不额外改结构
         if getattr(self.configs, 'use_film_in_ft', 0) == 1:
-            if self.configs.use_new_decomp != 2:
+            ti = self.channel_independence[0](trend)
+            tp = self.patch(ti)
+            t_emb = self.enc_embedding_trend(tp)
+            if self.configs.use_positional_encoding == 1:
+                t_emb = self.positional_encoding(t_emb)
+            zeros_t = torch.zeros_like(emb)
 
-                ti = self.channel_independence[0](trend)
-                tp = self.patch(ti)
-                t_emb = self.enc_embedding_trend(tp)
-                if self.configs.use_positional_encoding == 1:
-                    t_emb = self.positional_encoding(t_emb)
-                zeros_t = torch.zeros_like(emb)
+            h = torch.cat([zeros_t, t_emb], dim=-1)
 
-                # -------- FiLM 条件 --------
-                h = torch.cat([zeros_t, t_emb], dim=-1)  # [B*C, S, 2D]
+            if getattr(self.configs, 'film_mode', 'full') == 'full':
+                gamma = 1.0 + 0.1 * torch.tanh(self.cond_to_gamma(h))
+                beta = 0.1 * torch.tanh(self.cond_to_beta(h))
 
-                if getattr(self.configs, 'film_mode', 'full') == 'full':
-                    # 原版：trend + t 都参与
-                    gamma = 1.0 + 0.1 * torch.tanh(self.cond_to_gamma(h))
-                    beta = 0.1 * torch.tanh(self.cond_to_beta(h))
+            elif self.configs.film_mode == 'none':
+                gamma = torch.ones_like(h[..., :self.d_model])
+                beta = torch.zeros_like(h[..., :self.d_model])
 
-                elif self.configs.film_mode == 'none':
-                    # 消融：关闭 FiLM 调制
-                    gamma = torch.ones_like(h[..., :self.d_model])
-                    beta = torch.zeros_like(h[..., :self.d_model])
+            elif self.configs.film_mode == 'random':
+                gamma = 1.0 + 0.1 * torch.randn_like(h[..., :self.d_model])
+                beta = 0.1 * torch.randn_like(h[..., :self.d_model])
 
-                elif self.configs.film_mode == 'random':
-                    # 消融：随机调制
-                    gamma = 1.0 + 0.1 * torch.randn_like(h[..., :self.d_model])
-                    beta = 0.1 * torch.randn_like(h[..., :self.d_model])
+            elif self.configs.film_mode == 'trend_only':
+                gamma = 1.0 + 0.1 * torch.tanh(self.cond_to_gamma(t_emb))
+                beta = 0.1 * torch.tanh(self.cond_to_beta(t_emb))
 
-                elif self.configs.film_mode == 'trend_only':
-                    # 消融：只用趋势条件
-                    gamma = 1.0 + 0.1 * torch.tanh(self.cond_to_gamma(t_emb))
-                    beta = 0.1 * torch.tanh(self.cond_to_beta(t_emb))
+            elif self.configs.film_mode == 't_only':
+                gamma = 1.0 + 0.1 * torch.tanh(self.cond_to_gamma(zeros_t))
+                beta = 0.1 * torch.tanh(self.cond_to_beta(zeros_t))
 
-                elif self.configs.film_mode == 't_only':
-                    # 消融：只用时间步嵌入
-                    gamma = 1.0 + 0.1 * torch.tanh(self.cond_to_gamma(zeros_t))
-                    beta = 0.1 * torch.tanh(self.cond_to_beta(zeros_t))
+            # 如果你本来就想启用 FiLM，这里建议真正作用到 emb
+            emb = gamma * emb + beta
 
+        seasonal_enc = emb.reshape(batch_size, num_features, -1, self.d_model)
+        seasonal_enc = self.head(seasonal_enc)
 
+        y_enc = seasonal_enc + self.regression[0](trend.permute(0, 2, 1)).permute(0, 2, 1).contiguous()
 
-
-
-        seasonal_enc = emb.reshape(
-            batch_size, num_features, -1, self.d_model
-        )  # [batch_size, num_features, seq_len, d_model]
-        # x = torch.fft.ifft(x,dim=-2).real
-        # forecast
-        seasonal_enc = self.head(seasonal_enc)  # [bs, pred_len, n_vars]
-        if self.configs.use_new_decomp != 2:
-
-            y_enc = seasonal_enc + self.regression[0](trend.permute(0, 2, 1)).permute(0, 2, 1).contiguous()
-        else:
-            y_enc = seasonal_enc
-        # denormalization
         y_enc = y_enc * (stdevs[:, 0, :].unsqueeze(1)).repeat(1, self.pred_len, 1)
         y_enc = y_enc + (means[:, 0, :].unsqueeze(1)).repeat(1, self.pred_len, 1)
 
         return y_enc, freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss
-        # return x,0,0,0
-
     def forward(self, batch_x,x_mask,i=0):
 
         if self.task_name == "pretrain":

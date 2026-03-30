@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
   <component name="Black">
-    <option name="sdkName" value="Python 3.12 (TimeMixer55)" />
+    <option name="sdkName" value="py310t23cu118" />
   </component>
-  <component name="ProjectRootManager" version="2" project-jdk-name="py310t2cu118" project-jdk-type="Python SDK" />
+  <component name="ProjectRootManager" version="2" project-jdk-name="Remote Python 3.10.8 (sftp://root@connect.westb.seetacloud.com:24415/root/.virtualenvs/TimeDARTversion02/bin/python)" project-jdk-type="Python SDK" />
 </project>

@@ -479,8 +479,8 @@ class Exp_TimeDART(Exp_Basic):
         # ###############绘图
 
         # 解决中文显示问题
-        plt.rcParams['font.sans-serif'] = ['SimHei']  # 使用黑体
-        plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
+        # plt.rcParams['font.sans-serif'] = ['SimHei']  # 使用黑体
+        # plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
 
         # 下采样函数：每隔step个点取一个点
         def downsample(data, step=10):
@@ -991,7 +991,7 @@ class Exp_TimeDART(Exp_Basic):
                 self.args.log_var_freq,
                 self.args.use_loss_compute,self.args.use_new_decomp,self.args.use_denoise,self.args.use_inner_new_decomp,params_str))
         f.close()
-        np.save(npz_folder_path+os.sep+ 'metrics.npy', np.array([mae, mse, rmse, mape, mspe]))
-        np.save(npz_folder_path+os.sep+'pred.npy', preds)
-        np.save(npz_folder_path +os.sep+'true.npy', trues)
+        # np.save(npz_folder_path+os.sep+ 'metrics.npy', np.array([mae, mse, rmse, mape, mspe]))
+        # np.save(npz_folder_path+os.sep+'pred.npy', preds)
+        # np.save(npz_folder_path +os.sep+'true.npy', trues)
         return
