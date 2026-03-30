@@ -382,7 +382,7 @@ class Exp_TimeDART(Exp_Basic):
                 diff_loss = self.model(batch_x)
                 # diff_loss.requires_grad = True
             # diff_loss = model_criterion(pred_x, batch_x)
-            elif self.args.model == 'TimeDART':
+            elif self.args.model == 'TimeDART' or self.args.model == "TimeDART_for_trendcond":
                 # pred_x,freq_loss,orth_loss,smoothness,season_freq_loss,recon_loss = self.model(batch_x,batch_y,i)
                 # pred_x,freq_loss,orth_loss,smoothness,season_freq_loss = self.model(batch_x,batch_y,i)
                 diff_loss,freq_loss,orth_loss,smoothness,season_freq_loss,recon_loss = self.model(batch_x,batch_y,i)
@@ -479,8 +479,8 @@ class Exp_TimeDART(Exp_Basic):
         # ###############绘图
 
         # 解决中文显示问题
-        plt.rcParams['font.sans-serif'] = ['SimHei']  # 使用黑体
-        plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
+        # plt.rcParams['font.sans-serif'] = ['SimHei']  # 使用黑体
+        # plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
 
         # 下采样函数：每隔step个点取一个点
         def downsample(data, step=10):
@@ -547,7 +547,7 @@ class Exp_TimeDART(Exp_Basic):
                     # pred_x = self.model(batch_x)
                     diff_loss = self.model(batch_x)
                 # diff_loss = model_criterion(pred_x, batch_x)
-                elif self.args.model == 'TimeDART':
+                elif self.args.model == 'TimeDART' or self.args.model == "TimeDART_for_trendcond":
                     # pred_x, freq_loss, orth_loss, smoothness,season_freq_loss,recon_loss = self.model(batch_x, batch_x_m, i)
                     # diff_loss = self.model(batch_x)
                     # diff_loss = model_criterion(pred_x, batch_x)
@@ -614,7 +614,7 @@ class Exp_TimeDART(Exp_Basic):
             os.makedirs(path)
 
         # optimizer
-        model_optim = self._select_optimizer()
+        # model_optim = self._select_optimizer()
         early_stopping = EarlyStopping(patience=self.args.patience, verbose=True)
 
         model_optim = self._select_optimizer()
@@ -780,8 +780,8 @@ class Exp_TimeDART(Exp_Basic):
         # ###############绘图
 
         # 解决中文显示问题
-        plt.rcParams['font.sans-serif'] = ['SimHei']  # 使用黑体
-        plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
+        # plt.rcParams['font.sans-serif'] = ['SimHei']  # 使用黑体
+        # plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
 
         # 下采样函数：每隔step个点取一个点
         def downsample(data, step=10):
@@ -991,7 +991,7 @@ class Exp_TimeDART(Exp_Basic):
                 self.args.log_var_freq,
                 self.args.use_loss_compute,self.args.use_new_decomp,self.args.use_denoise,self.args.use_inner_new_decomp,params_str))
         f.close()
-        np.save(npz_folder_path+os.sep+ 'metrics.npy', np.array([mae, mse, rmse, mape, mspe]))
-        np.save(npz_folder_path+os.sep+'pred.npy', preds)
-        np.save(npz_folder_path +os.sep+'true.npy', trues)
+        # np.save(npz_folder_path+os.sep+ 'metrics.npy', np.array([mae, mse, rmse, mape, mspe]))
+        # np.save(npz_folder_path+os.sep+'pred.npy', preds)
+        # np.save(npz_folder_path +os.sep+'true.npy', trues)
         return

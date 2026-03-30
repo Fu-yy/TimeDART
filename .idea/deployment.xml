@@ -2,98 +2,111 @@
 <project version="4">
   <component name="PublishConfigData" autoUpload="On explicit save action" remoteFilesAllowedToDisappearOnAutoupload="false" autoUploadExternalChanges="true">
     <serverData>
-      <paths name="1120231440@172.23.10.23:9933 password">
+      <paths name="B783运行扰动pretrain和两阶段34">
         <serverdata>
           <mappings>
             <mapping local="$PROJECT_DIR$" web="/" />
           </mappings>
         </serverdata>
       </paths>
-      <paths name="1120231440@172.23.10.23:9933 password (2)">
+      <paths name="B861机运行扰动pretrain和两阶段56">
         <serverdata>
           <mappings>
             <mapping local="$PROJECT_DIR$" web="/" />
           </mappings>
         </serverdata>
       </paths>
-      <paths name="1120231440@172.23.10.23:9933 password (3)">
+      <paths name="B861运行扰动pretrain和两阶段">
         <serverdata>
           <mappings>
             <mapping local="$PROJECT_DIR$" web="/" />
           </mappings>
         </serverdata>
       </paths>
-      <paths name="1120231440@172.23.10.23:9933 password (4)">
+      <paths name="B区830机运行扰动pretrain和两阶段910">
         <serverdata>
           <mappings>
             <mapping local="$PROJECT_DIR$" web="/" />
           </mappings>
         </serverdata>
       </paths>
-      <paths name="1120231455@172.23.10.23:9933 password">
+      <paths name="B区D29机运行扰动pretrain和两阶段78">
         <serverdata>
           <mappings>
             <mapping local="$PROJECT_DIR$" web="/" />
           </mappings>
         </serverdata>
       </paths>
-      <paths name="1120231455@172.23.10.23:9933 password (2)">
+      <paths name="root@connect.westc.seetacloud.com:31586 password">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/root/autodl-tmp/TimeDARTversion01" local="$PROJECT_DIR$" web="/" />
+          </mappings>
+          <excludedPaths>
+            <excludedPath local="true" path="$PROJECT_DIR$/datasets" />
+          </excludedPaths>
+        </serverdata>
+      </paths>
+      <paths name="root@connect.westc.seetacloud.com:52559 password">
         <serverdata>
           <mappings>
             <mapping local="$PROJECT_DIR$" web="/" />
           </mappings>
         </serverdata>
       </paths>
-      <paths name="MICN_Experience">
+      <paths name="西北B830">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/root/autodl-tmp/TimeDARTversion01" local="$PROJECT_DIR$" />
+          </mappings>
+          <excludedPaths>
+            <excludedPath local="true" path="$PROJECT_DIR$/datasets" />
+          </excludedPaths>
+        </serverdata>
+      </paths>
+      <paths name="西北B861">
         <serverdata>
           <mappings>
             <mapping local="$PROJECT_DIR$" web="/" />
           </mappings>
         </serverdata>
       </paths>
-      <paths name="TSlib_remote_40">
+      <paths name="西北B区 / 807机--iTransformer">
         <serverdata>
           <mappings>
             <mapping local="$PROJECT_DIR$" web="/" />
           </mappings>
         </serverdata>
       </paths>
-      <paths name="TimeLLM">
+      <paths name="西北B区 / 828机--joint等中间三分之一">
         <serverdata>
           <mappings>
             <mapping local="$PROJECT_DIR$" web="/" />
           </mappings>
         </serverdata>
       </paths>
-      <paths name="TimeSeries40">
+      <paths name="西北B区 / 881机--joint-后三分之一">
         <serverdata>
           <mappings>
             <mapping local="$PROJECT_DIR$" web="/" />
           </mappings>
         </serverdata>
       </paths>
-      <paths name="TimeSeries55">
+      <paths name="西北B区 556机 运行扰动pretrain和两阶段12">
         <serverdata>
           <mappings>
             <mapping local="$PROJECT_DIR$" web="/" />
           </mappings>
         </serverdata>
       </paths>
-      <paths name="autodl_TimeDART">
-        <serverdata>
-          <mappings>
-            <mapping deploy="/root/python/TimeDART" local="$PROJECT_DIR$" web="/" />
-          </mappings>
-        </serverdata>
-      </paths>
-      <paths name="test_MICN_1455_1120231455@172.23.10.23:9933 password (2)">
+      <paths name="西北B区 720机-测试params">
         <serverdata>
           <mappings>
             <mapping local="$PROJECT_DIR$" web="/" />
           </mappings>
         </serverdata>
       </paths>
-      <paths name="time_series_remote">
+      <paths name="西北B区746机--joint等前三分之一">
         <serverdata>
           <mappings>
             <mapping local="$PROJECT_DIR$" web="/" />

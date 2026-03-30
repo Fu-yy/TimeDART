@@ -270,6 +270,13 @@ parser.add_argument('--not_context', type=int, help='peak_threshold', default=0)
 parser.add_argument('--not_cond', type=int, help='peak_threshold', default=0)
 parser.add_argument('--no_film', type=int, help='no_film', default=0)
 
+# 消融--icml 2026-03-26 09:12:19
+parser.add_argument('--use_trend_context_pretrain', type=int, help='use_trend_context_pretrain ', default=1)
+parser.add_argument('--use_trend_context_denoiser', type=int, help='use_trend_context_denoiser  ', default=1)
+parser.add_argument('--use_trend_context_finetune', type=int, help='use_trend_context_finetune   ', default=1)
+parser.add_argument('--trend_context_mode', type=str, help='trend_context_mode,true,shuffle,noise', default='true')
+parser.add_argument('--trend_noise_std', type=float, help='trend_noise_std', default=0.1)
+
 
 
 
@@ -358,7 +365,7 @@ elif args.task_name == "finetune":
         args.load_checkpoints = os.path.join(
             args.pretrain_checkpoints, args.data + '_dln_' + str(args.denoise_layers_num), args.transfer_checkpoints
         )
-        args.load_checkpoints = None
+        # args.load_checkpoints = None
         exp = Exp(args)  # set experiments
 
         print(">>>>>>>start training : {}>>>>>>>>>>>>>>>>>>>>>>>>>>".format(setting))

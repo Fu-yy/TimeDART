@@ -926,8 +926,26 @@ class Model(nn.Module):
             nn.Tanh()  # 限制范围，防止梯度爆炸
         )
 
+    def build_trend_context(self, trend_emb):
+        mode = getattr(self.configs, 'trend_context_mode', 'true')
 
+        if mode == 'true':
+            return trend_emb
 
+        elif mode == 'none':
+            return None
+
+        elif mode == 'shuffle':
+            # 打乱 batch 维，不改变数值分布，但破坏正确配对
+            perm = torch.randperm(trend_emb.size(0), device=trend_emb.device)
+            return trend_emb[perm]
+
+        elif mode == 'noise':
+            std = self.configs.trend_noise_std
+            return trend_emb + std * torch.randn_like(trend_emb)
+
+        else:
+            raise ValueError(f"Unknown trend_context_mode: {mode}")
     def init_adaptive_weights(self, sample_batch):
         """ 用样本数据初始化自适应权重 """
         with torch.no_grad():
@@ -1065,11 +1083,15 @@ class Model(nn.Module):
         # x_embedding_bias, _ = self.decomp_multi(x_embedding_bias)
         # x_embedding_bias, _ = x_embedding_bias,x_embedding_
         if self.configs.use_pretrain_encoder == 1:
-            x_emb  = self.encoder(
+            pretrain_context = trend_emb if self.configs.use_trend_context_pretrain == 1 else None
+            if pretrain_context is not None:
+                pretrain_context = self.build_trend_context(pretrain_context)
+
+            x_emb = self.encoder(
                 x_embedding_bias,
-                context=trend_emb,
+                context=pretrain_context,
                 is_mask=False,
-            )  # [batch_size * num_features, seq_len, d_model]
+            )
         else:
             x_emb=x_embedding_bias
         # 获取总去噪层数和扩散模型总时间步
@@ -1223,11 +1245,15 @@ class Model(nn.Module):
 
         if self.configs.use_finetune_encoder == 1:
 
+            ft_context = trend_emb if self.configs.use_trend_context_finetune == 1 else None
+            if ft_context is not None:
+                ft_context = self.build_trend_context(ft_context)
+
             emb = self.encoder(
                 seasonal_emb_pos,
-                context=trend_emb,
+                context=ft_context,
                 is_mask=False,
-            )  # [batch_size * num_features, seq_len, d_model]
+            )
         else:
             emb=seasonal_emb_pos
         # 可选：FiLM

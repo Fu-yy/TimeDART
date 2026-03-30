@@ -1052,14 +1052,10 @@ class Model(nn.Module):
 
 
         # -------- trend 条件编码（时间域 -> D，广播到序列）--------
-        if self.configs.use_trend_context_pretrain == 0:
-            trend=0
-            trend_emb=None
-        else:
 
-            trend_ci = self.channel_independence[0](trend)  # [B*C, L, 1]
-            trend_patch = self.patch(trend_ci)  # [B*C, S, P]
-            trend_emb = self.enc_embedding_trend(trend_patch)
+        trend_ci = self.channel_independence[0](trend)  # [B*C, L, 1]
+        trend_patch = self.patch(trend_ci)  # [B*C, S, P]
+        trend_emb = self.enc_embedding_trend(trend_patch)
 
         # 分解  2
         # x_embedding_bias, _ = self.decomp_multi(x_embedding_bias)
@@ -1212,14 +1208,10 @@ class Model(nn.Module):
             seasonal_emb_pos = self.positional_encoding(seasonal_emb)  # [batch_size * num_features, seq_len, d_model]
         else:
             seasonal_emb_pos = seasonal_emb
-        if self.configs.use_trend_context_pretrain == 0:
-            trend=0
-            trend_emb=None
-        else:
 
-            trend_ci = self.channel_independence[0](trend)  # [B*C, L, 1]
-            trend_patch = self.patch(trend_ci)  # [B*C, S, P]
-            trend_emb = self.enc_embedding_trend(trend_patch)
+        trend_ci = self.channel_independence[0](trend)  # [B*C, L, 1]
+        trend_patch = self.patch(trend_ci)  # [B*C, S, P]
+        trend_emb = self.enc_embedding_trend(trend_patch)
 
         if self.configs.use_finetune_encoder == 1:
 
@@ -1231,50 +1223,47 @@ class Model(nn.Module):
         else:
             emb=seasonal_emb_pos
         # 可选：FiLM
-
-        if self.configs.use_trend_context_pretrain != 0:
-
-            if getattr(self.configs, 'use_film_in_ft', 0) == 1:
-                ti = self.channel_independence[0](trend)
-                tp = self.patch(ti)
-                t_emb = self.enc_embedding_trend(tp)
-                if self.configs.use_positional_encoding == 1:
-                    t_emb = self.positional_encoding(t_emb)
-                zeros_t = torch.zeros_like(emb)
+        if getattr(self.configs, 'use_film_in_ft', 0) == 1:
+            ti = self.channel_independence[0](trend)
+            tp = self.patch(ti)
+            t_emb = self.enc_embedding_trend(tp)
+            if self.configs.use_positional_encoding == 1:
+                t_emb = self.positional_encoding(t_emb)
+            zeros_t = torch.zeros_like(emb)
 
 
 
-                # h = torch.cat([zeros_t, t_emb], -1)
-                # gamma = 1.0 + 0.1 * torch.tanh(self.cond_to_gamma(h))
-                # beta = 0.1 * torch.tanh(self.cond_to_beta(h))
-                # emb = gamma * emb + beta
-                # -------- FiLM 条件 --------
-                h = torch.cat([zeros_t, t_emb], dim=-1)  # [B*C, S, 2D]
+            # h = torch.cat([zeros_t, t_emb], -1)
+            # gamma = 1.0 + 0.1 * torch.tanh(self.cond_to_gamma(h))
+            # beta = 0.1 * torch.tanh(self.cond_to_beta(h))
+            # emb = gamma * emb + beta
+            # -------- FiLM 条件 --------
+            h = torch.cat([zeros_t, t_emb], dim=-1)  # [B*C, S, 2D]
 
-                if getattr(self.configs, 'film_mode', 'full') == 'full':
-                    # 原版：trend + t 都参与
-                    gamma = 1.0 + 0.1 * torch.tanh(self.cond_to_gamma(h))
-                    beta = 0.1 * torch.tanh(self.cond_to_beta(h))
+            if getattr(self.configs, 'film_mode', 'full') == 'full':
+                # 原版：trend + t 都参与
+                gamma = 1.0 + 0.1 * torch.tanh(self.cond_to_gamma(h))
+                beta = 0.1 * torch.tanh(self.cond_to_beta(h))
 
-                elif self.configs.film_mode == 'none':
-                    # 消融：关闭 FiLM 调制
-                    gamma = torch.ones_like(h[..., :self.d_model])
-                    beta = torch.zeros_like(h[..., :self.d_model])
+            elif self.configs.film_mode == 'none':
+                # 消融：关闭 FiLM 调制
+                gamma = torch.ones_like(h[..., :self.d_model])
+                beta = torch.zeros_like(h[..., :self.d_model])
 
-                elif self.configs.film_mode == 'random':
-                    # 消融：随机调制
-                    gamma = 1.0 + 0.1 * torch.randn_like(h[..., :self.d_model])
-                    beta = 0.1 * torch.randn_like(h[..., :self.d_model])
+            elif self.configs.film_mode == 'random':
+                # 消融：随机调制
+                gamma = 1.0 + 0.1 * torch.randn_like(h[..., :self.d_model])
+                beta = 0.1 * torch.randn_like(h[..., :self.d_model])
 
-                elif self.configs.film_mode == 'trend_only':
-                    # 消融：只用趋势条件
-                    gamma = 1.0 + 0.1 * torch.tanh(self.cond_to_gamma(t_emb))
-                    beta = 0.1 * torch.tanh(self.cond_to_beta(t_emb))
+            elif self.configs.film_mode == 'trend_only':
+                # 消融：只用趋势条件
+                gamma = 1.0 + 0.1 * torch.tanh(self.cond_to_gamma(t_emb))
+                beta = 0.1 * torch.tanh(self.cond_to_beta(t_emb))
 
-                elif self.configs.film_mode == 't_only':
-                    # 消融：只用时间步嵌入
-                    gamma = 1.0 + 0.1 * torch.tanh(self.cond_to_gamma(zeros_t))
-                    beta = 0.1 * torch.tanh(self.cond_to_beta(zeros_t))
+            elif self.configs.film_mode == 't_only':
+                # 消融：只用时间步嵌入
+                gamma = 1.0 + 0.1 * torch.tanh(self.cond_to_gamma(zeros_t))
+                beta = 0.1 * torch.tanh(self.cond_to_beta(zeros_t))
 
 
 
@@ -1286,11 +1275,7 @@ class Model(nn.Module):
         # x = torch.fft.ifft(x,dim=-2).real
         # forecast
         seasonal_enc = self.head(seasonal_enc)  # [bs, pred_len, n_vars]
-        if self.configs.use_trend_context_pretrain == 0:
-            y_enc=seasonal_enc
-        else:
-
-            y_enc = seasonal_enc + self.regression[0](trend.permute(0, 2, 1)).permute(0, 2, 1).contiguous()
+        y_enc = seasonal_enc + self.regression[0](trend.permute(0, 2, 1)).permute(0, 2, 1).contiguous()
 
         # denormalization
         y_enc = y_enc * (stdevs[:, 0, :].unsqueeze(1)).repeat(1, self.pred_len, 1)
