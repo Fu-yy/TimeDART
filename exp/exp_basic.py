@@ -1,6 +1,7 @@
 import os
 import torch
-from models import TimeDART, SimMTM, PatchTST, TimeDART_my
+from models import TimeDART, SimMTM, PatchTST, TimeDART_my, TimeDART_for_trendcond, \
+    TimeDART_paramsandtime_re_20260330103340
 
 
 class Exp_Basic(object):
@@ -10,7 +11,9 @@ class Exp_Basic(object):
             'TimeDART': TimeDART,
             'SimMTM': SimMTM,
             'PatchTST': PatchTST,
-            'TimeDART_my': TimeDART_my
+            'TimeDART_my': TimeDART_my,
+            'TimeDART_for_trendcond': TimeDART_for_trendcond,
+            'TimeDART_paramsandtime_re_20260330103340': TimeDART_paramsandtime_re_20260330103340
         }
         self.device = self._acquire_device()
         self.model = self._build_model().to(self.device)

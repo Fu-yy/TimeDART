@@ -316,33 +316,16 @@ class StopLearnableMultiScaleDecomp(nn.Module):
     def forward(self, x):
         # 输入x形状: [Batch, Length, Channels]
         if self.fixed_convs is None:
-            # 动态计算scales（基于当前批次数据）
-            with torch.no_grad():  # 不参与梯度计算
-                # self.scales = calculate_scales_optimized(
-                #     x,
-                #     num_scales=self.num_scales,
-                #     # max_lag=self.max_lag,
-                #     # peak_threshold=self.peak_threshold
-                # )
+            with torch.no_grad():
                 self.scales = calculate_scales_optimized_toech(
                     x,
                     num_scales=self.num_scales,
                     distance=self.distance,
                     peak_threshold=self.peak_threshold,
                     max_lag=self.max_lag,
-                    # peak_threshold=self.peak_threshold
                 )
 
-            # 创建多尺度卷积模块
-            self.fixed_convs = FixedMultiScaleConv(self.nvar, self.scales)
-            self.add_module('fixed_convs', self.fixed_convs)  # 注册到模块
-
-            # self.weight_gen = LightWeightGenerator(self.nvar, len(self.scales))
-            # self.add_module('weight_gen', self.weight_gen)  # 注册到模块
-
-            # 确保模块参数与输入数据在同一设备
-            self.fixed_convs.to(x.device)
-            # self.weight_gen.to(x.device)
+            self.fixed_convs = FixedMultiScaleConv(self.nvar, self.scales).to(x.device)
 
 
 
@@ -781,6 +764,8 @@ class Model(nn.Module):
             ]
         )
 
+
+
         # Patch
         self.patch_len = configs.patch_len
         self.stride = configs.stride
@@ -808,7 +793,7 @@ class Model(nn.Module):
             sos_token=self.sos_token,
         )
 
-        # Encoder (TCSR 主体：你这里把它视作条件 encoder)
+        # Encoder (Casual Trasnformer)
         self.diffusion = Diffusion(
             time_steps=configs.time_steps,
             device=self.device,
@@ -822,15 +807,18 @@ class Model(nn.Module):
             num_layers=configs.e_layers,
         )
 
+
+
         # Decoder
         if self.task_name == "pretrain":
+
             self.projection = nn.ModuleList(
                 [FlattenHead(
-                    seq_len=self.seq_len // (configs.down_sampling_window ** i),
-                    d_model=self.d_model,
-                    pred_len=configs.input_len,
-                    dropout=configs.head_dropout,
-                )
+                seq_len=self.seq_len // (configs.down_sampling_window ** i),
+                d_model=self.d_model,
+                pred_len=configs.input_len,
+                dropout=configs.head_dropout,
+            )
                     for i in range(configs.down_sampling_layers + 1)
                 ]
             )
@@ -840,13 +828,25 @@ class Model(nn.Module):
                 for i in range(configs.down_sampling_layers + 1)
             ])
 
+
+
         elif self.task_name == "finetune":
+            # self.head = FlattenHead(
+            #     seq_len=self.seq_len,
+            #     d_model=configs.d_model,
+            #     pred_len=configs.pred_len,
+            #     dropout=configs.head_dropout,
+            # )
+
+
+
             self.head = FlattenHead(
-                seq_len=self.seq_len,
-                d_model=self.d_model,
-                pred_len=configs.pred_len,
-                dropout=configs.head_dropout,
-            )
+                    seq_len=self.seq_len,
+                    d_model=self.d_model,
+                    pred_len=configs.pred_len,
+                    dropout=configs.head_dropout,
+                )
+
 
             self.regression = nn.ModuleList([
                 nn.Linear(self.input_len, configs.pred_len)
@@ -860,28 +860,27 @@ class Model(nn.Module):
             self.log_var_season_freq = nn.Parameter(torch.zeros(1), requires_grad=True)
             self.log_var_recon = nn.Parameter(torch.zeros(1), requires_grad=True)
         else:
+            # 修正后的初始化参数（基于损失量级平衡）  ##  注意 这里的每个self.configs.log_var_freq表示的是方差
             self.log_var_freq = nn.Parameter(torch.tensor(self.configs.log_var_freq), requires_grad=True)
             self.log_var_orth = nn.Parameter(torch.tensor(self.configs.log_var_orth), requires_grad=True)
             self.log_var_smooth = nn.Parameter(torch.tensor(self.configs.log_var_smooth), requires_grad=True)
             self.log_var_season_freq = nn.Parameter(torch.tensor(self.configs.log_var_season_freq), requires_grad=True)
             self.log_var_recon = nn.Parameter(torch.tensor(self.configs.log_var_recon), requires_grad=True)
 
-        # AASD / decomposition
+
+
+
         self.decomp_multi = series_decomp(95)
-        self.decomp_multi_learnable = StopLearnableMultiScaleDecomp(
-            self.configs.c_out,
-            max_lag=self.configs.max_lag,
-            num_scales=self.configs.num_scales,
-            peak_threshold=self.configs.peak_threshold,
-            distance=10
-        )
+        self.decomp_multi_learnable = StopLearnableMultiScaleDecomp(self.configs.c_out,max_lag=self.configs.max_lag,num_scales=self.configs.num_scales,peak_threshold=self.configs.peak_threshold,distance=10)
 
         self.denoise_layers_num = configs.denoise_layers_num
 
-        self.pretrain_noise = getattr(configs, 'pretrain_noise', 'mask')
+
+        # 在 __init__ 尾部、其它属性旁边
+        self.pretrain_noise = getattr(configs, 'pretrain_noise', 'mask')  # 'mask' 或 'tembed'
         self.mask_block = getattr(configs, 'lm', 12)
         self.mask_ratio = getattr(configs, 'mask_ratio', 0.5)
-
+        # ------- t-embedding（A 版） -------
         if getattr(configs, 'use_t_embed', 1) == 1:
             self.t_embed = nn.Sequential(
                 nn.Embedding(configs.time_steps, self.d_model),
@@ -892,83 +891,117 @@ class Model(nn.Module):
         else:
             self.t_embed = None
 
-        self.cond_to_gamma = nn.Linear(self.d_model * 2, self.d_model)
+        # ------- FiLM 条件调制（两版都可用） -------
+        self.cond_to_gamma = nn.Linear(self.d_model * 2, self.d_model)  # concat(t_emb, cond)
         self.cond_to_beta = nn.Linear(self.d_model * 2, self.d_model)
         self.cat_2 = nn.Linear(self.d_model * 2, self.d_model)
         self.enc_embedding_trend = PatchEmbedding(
             patch_len=self.patch_len,
             d_model=self.d_model,
         )
-        self.stable_denoiser = StableCondDenoiser(
-            d_model=self.d_model,
-            n_heads=self.num_heads,
-            dropout=self.dropout,
-            use_film=True
-        )
-        self.cond_proj = nn.Linear(self.d_model, self.d_model)
+        self.stable_denoiser = StableCondDenoiser(d_model=self.d_model, n_heads=self.num_heads, dropout=self.dropout,
+                                                  use_film=True)
+        self.cond_proj = nn.Linear(self.d_model, self.d_model)  # 轻量投影，避免尺度打架
 
+        # 在 __init__ 中添加
         self.ib_projector = nn.Sequential(
-            nn.Linear(self.d_model, 2 * self.d_model),
-            nn.Tanh()
+            nn.Linear(self.d_model, 2 * self.d_model),  # 输出 [mu, logvar]
+            nn.Tanh()  # 限制范围，防止梯度爆炸
         )
 
-        # =========================
-        # Profiling 开关（新增）
-        # =========================
-        # 1 = 用模块；0 = 跳过模块
-        self.profile_use_aasd = getattr(configs, 'profile_use_aasd', 1)
-        self.profile_use_tcsr = getattr(configs, 'profile_use_tcsr', 1)
+        # ===== ablation mode =====
+        # full / no_aasd / no_tcsr / no_aasd_no_tcsr
+        self.ablation_mode = self.configs.ablation_mode
 
-    # =========================
-    # Helper functions
-    # =========================
-    def _zero_losses(self, x):
-        z = x.new_tensor(0.0)
+
+    def set_ablation_mode(self, mode="full"):
+        """
+        mode:
+            - full
+            - no_aasd
+            - no_tcsr
+            - no_aasd_no_tcsr
+        """
+        assert mode in ["full", "no_aasd", "no_tcsr", "no_aasd_no_tcsr"]
+        self.ablation_mode = mode
+
+    def _disable_aasd(self):
+        return self.ablation_mode in ["no_aasd", "no_aasd_no_tcsr"]
+
+    def _disable_tcsr(self):
+        return self.ablation_mode in ["no_tcsr", "no_aasd_no_tcsr"]
+
+    def _zero_loss_like(self, x):
+        z = torch.zeros(1, device=x.device, dtype=x.dtype)
         return z, z, z, z, z
 
-    def _run_decomp_profiled(self, x):
+    def _run_decomposition(self, x):
         """
-        AASD profiling:
-        profile_use_aasd = 1 -> 正常跑分解
-        profile_use_aasd = 0 -> 跳过 AASD，仅返回 passthrough seasonal 和零 trend
+        统一管理是否启用 AASD
+        返回:
+            seasonal, trend, freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss
         """
-        if self.profile_use_aasd == 0:
+        if self._disable_aasd():
             seasonal = x
             trend = torch.zeros_like(x)
-            freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss = self._zero_losses(x)
+            freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss = self._zero_loss_like(x)
             return seasonal, trend, freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss
 
-        # 正常逻辑
+        # ===== 原始逻辑 =====
         if self.configs.use_new_decomp == 1:
             seasonal, trend, freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss = self.decomp_multi_learnable(x)
         elif self.configs.use_new_decomp == 2:
-            seasonal, trend = x, x
-            freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss = self._zero_losses(x)
+            # 你原来这里 seasonal, trend = x, x 不太合理，会重复叠加
+            # 改成 seasonal=x, trend=0 更适合作为无分解/无AASD基线
+            seasonal = x
+            trend = torch.zeros_like(x)
+            freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss = self._zero_loss_like(x)
         else:
             seasonal, trend = self.decomp_multi(x)
-            freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss = self._zero_losses(x)
+            freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss = self._zero_loss_like(x)
 
         return seasonal, trend, freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss
 
-    def _run_tcsr_profiled(self, seasonal_emb_pos, trend_emb):
-        """
-        TCSR profiling:
-        你这里把 TCSR 看作 encoder + trend-conditioned context
-        profile_use_tcsr = 1 -> 正常跑 encoder
-        profile_use_tcsr = 0 -> 直接 bypass encoder
-        """
-        if self.profile_use_tcsr == 0:
-            return seasonal_emb_pos
+    def _use_pretrain_encoder_now(self):
+        return (self.configs.use_pretrain_encoder == 1) and (not self._disable_tcsr())
 
-        return self.encoder(
-            seasonal_emb_pos,
-            context=trend_emb,
-            is_mask=False,
-        )
+    def _use_finetune_encoder_now(self):
+        return (self.configs.use_finetune_encoder == 1) and (not self._disable_tcsr())
 
+    def count_active_parameters(self, trainable_only=False):
+        """
+        按当前 ablation_mode 统计“实际启用模块”的参数数目。
+        注意：不用 sum(self.parameters())，否则去掉的模块参数仍会被统计进去。
+        """
+        skip_prefixes = []
+
+        if self._disable_aasd():
+            skip_prefixes.append("decomp_multi_learnable.")
+
+        if self._disable_tcsr():
+            skip_prefixes.append("encoder.")
+
+        total = 0
+        for name, p in self.named_parameters():
+            if trainable_only and (not p.requires_grad):
+                continue
+
+            skip_flag = False
+            for prefix in skip_prefixes:
+                if name.startswith(prefix):
+                    skip_flag = True
+                    break
+            if skip_flag:
+                continue
+
+            total += p.numel()
+        return total
     def init_adaptive_weights(self, sample_batch):
+        """ 用样本数据初始化自适应权重 """
         with torch.no_grad():
-            _, freq_loss, orth_loss, smooth_loss, season_freq_loss, recon_loss = self.forward(sample_batch, None)
+            _, freq_loss, orth_loss, smooth_loss, season_freq_loss, recon_loss = self.forward(sample_batch,None)
+
+            # 核心公式：log_var = log(损失值)
             self.log_var_freq.data = freq_loss + 1e-8
             self.log_var_orth.data = orth_loss + 1e-8
             self.log_var_smooth.data = smooth_loss + 1e-8
@@ -976,6 +1009,10 @@ class Model(nn.Module):
             self.log_var_recon.data = recon_loss + 1e-8
 
     def pretrain(self, x, x_mask, i=0):
+        mask_rate = 0.5
+        lm = 3
+        positive_nums = 1
+        e_x = x
         device = x.device
         batch_size, input_len, num_features = x.size()
 
@@ -986,8 +1023,8 @@ class Model(nn.Module):
 
         B, L, C = x.shape
 
-        # ===== AASD / decomposition =====
-        seasonal, trend, freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss = self._run_decomp_profiled(x)
+        # ===== 统一由辅助函数控制 AASD 是否启用 =====
+        seasonal, trend, freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss = self._run_decomposition(x)
 
         M = None
         eps = None
@@ -1045,7 +1082,7 @@ class Model(nn.Module):
         else:
             x_tilde = seasonal + trend
 
-        # ===== encode seasonal =====
+        # ===== seasonal branch =====
         x_ci = self.channel_independence[0](x_tilde)
         x_patch = self.patch(x_ci)
         x_emb = self.enc_embedding(x_patch)
@@ -1058,24 +1095,60 @@ class Model(nn.Module):
         if self.configs.use_positional_encoding == 1:
             x_embedding_bias = self.positional_encoding(x_embedding_bias)
 
-        # ===== trend context =====
-        if self.configs.use_trend_context_pretrain == 0:
-            trend = torch.zeros_like(trend)
-            trend_emb = None
-        else:
-            trend_ci = self.channel_independence[0](trend)
-            trend_patch = self.patch(trend_ci)
-            trend_emb = self.enc_embedding_trend(trend_patch)
+        # ===== trend condition =====
+        trend_ci = self.channel_independence[0](trend)
+        trend_patch = self.patch(trend_ci)
+        trend_emb = self.enc_embedding_trend(trend_patch)
 
-        # ===== TCSR / encoder =====
-        if self.configs.use_pretrain_encoder == 1:
-            x_emb = self._run_tcsr_profiled(x_embedding_bias, trend_emb)
+        # ===== 统一由辅助函数控制 TCSR/encoder 是否启用 =====
+        if self._use_pretrain_encoder_now():
+            x_emb = self.encoder(
+                x_embedding_bias,
+                context=trend_emb,
+                is_mask=False,
+            )
         else:
             x_emb = x_embedding_bias
 
+        cond_trend = trend_emb
+
+        if self.configs.pretrain_mode == 'noise':
+            if self.t_embed is not None:
+                t_big = t.view(B, 1).repeat(1, x_emb.size(1))
+                t_big = t_big.repeat_interleave(C, dim=0)
+                t_emb = self.t_embed(t_big)
+            else:
+                t_emb = torch.zeros_like(x_emb)
+        else:
+            t_emb = torch.zeros_like(x_emb)
+
+        feat = x_emb
+        denoised_bsd = None
+
+        if getattr(self.configs, 'use_pretrain_in_ft', 0) == 1:
+            if self.configs.pretrain_mode == 'noise':
+                cond_bc = trend_emb + t_emb
+            else:
+                cond_bc = trend_emb
+
+            cond_bc = self.cond_proj(cond_bc)
+            context_bc = trend_emb.detach()
+
+            feat_bsd = feat.view(B, C, -1, self.d_model).reshape(B * C, -1, self.d_model)
+            context_bsd = context_bc.view(B * C, -1, self.d_model)
+            cond_bsd = cond_bc.view(B * C, -1, self.d_model)
+
+            denoised_bsd = self.stable_denoiser(
+                noisy=x_emb,
+                context=context_bsd,
+                cond=None,
+                key_padding_mask=None
+            )
+            feat = denoised_bsd + x_emb
+
         kl_loss = 0.0
 
-        feat = x_emb.view(B, C, -1, self.d_model)
+        feat = feat.view(B, C, -1, self.d_model)
         seasonal_hat = self.projection[0](feat)
 
         x_hat_norm = seasonal_hat + trend
@@ -1092,8 +1165,11 @@ class Model(nn.Module):
         else:
             loss_rec = F.mse_loss(x_hat_norm, x)
 
-        total_freq, total_orth, total_smooth, total_season_freq, total_recon_loss = \
-            freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss
+        total_freq = freq_loss
+        total_orth = orth_loss
+        total_smooth = smoothness
+        total_season_freq = season_freq_loss
+        total_recon_loss = recon_loss
 
         return loss_rec + 0.02 * kl_loss, total_freq, total_orth, total_smooth, total_season_freq, total_recon_loss
 
@@ -1105,8 +1181,8 @@ class Model(nn.Module):
         stdevs = torch.sqrt(torch.var(x, dim=1, keepdim=True, unbiased=False) + 1e-5).detach()
         x = x / stdevs
 
-        # ===== AASD / decomposition =====
-        seasonal, trend, freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss = self._run_decomp_profiled(x)
+        # ===== 统一由辅助函数控制 AASD 是否启用 =====
+        seasonal, trend, freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss = self._run_decomposition(x)
 
         seasonal_ci = self.channel_independence[0](seasonal)
         seasonal_ci = self.patch(seasonal_ci)
@@ -1117,33 +1193,57 @@ class Model(nn.Module):
         else:
             seasonal_emb_pos = seasonal_emb
 
-        if self.configs.use_trend_context_pretrain == 0:
-            trend = torch.zeros_like(trend)
-            trend_emb = None
-        else:
-            trend_ci = self.channel_independence[0](trend)
-            trend_patch = self.patch(trend_ci)
-            trend_emb = self.enc_embedding_trend(trend_patch)
+        trend_ci = self.channel_independence[0](trend)
+        trend_patch = self.patch(trend_ci)
+        trend_emb = self.enc_embedding_trend(trend_patch)
 
-        # ===== TCSR / encoder =====
-        if self.configs.use_finetune_encoder == 1:
-            emb = self._run_tcsr_profiled(seasonal_emb_pos, trend_emb)
+        # ===== 统一由辅助函数控制 TCSR/encoder 是否启用 =====
+        if self._use_finetune_encoder_now():
+            emb = self.encoder(
+                seasonal_emb_pos,
+                context=trend_emb,
+                is_mask=False,
+            )
         else:
             emb = seasonal_emb_pos
+
+        if getattr(self.configs, 'use_film_in_ft', 0) == 1:
+            ti = self.channel_independence[0](trend)
+            tp = self.patch(ti)
+            t_emb = self.enc_embedding_trend(tp)
+            if self.configs.use_positional_encoding == 1:
+                t_emb = self.positional_encoding(t_emb)
+
+            zeros_t = torch.zeros_like(emb)
+            h = torch.cat([zeros_t, t_emb], dim=-1)
+
+            if getattr(self.configs, 'film_mode', 'full') == 'full':
+                gamma = 1.0 + 0.1 * torch.tanh(self.cond_to_gamma(h))
+                beta = 0.1 * torch.tanh(self.cond_to_beta(h))
+            elif self.configs.film_mode == 'none':
+                gamma = torch.ones_like(h[..., :self.d_model])
+                beta = torch.zeros_like(h[..., :self.d_model])
+            elif self.configs.film_mode == 'random':
+                gamma = 1.0 + 0.1 * torch.randn_like(h[..., :self.d_model])
+                beta = 0.1 * torch.randn_like(h[..., :self.d_model])
+            elif self.configs.film_mode == 'trend_only':
+                gamma = 1.0 + 0.1 * torch.tanh(self.cond_to_gamma(t_emb))
+                beta = 0.1 * torch.tanh(self.cond_to_beta(t_emb))
+            elif self.configs.film_mode == 't_only':
+                gamma = 1.0 + 0.1 * torch.tanh(self.cond_to_gamma(zeros_t))
+                beta = 0.1 * torch.tanh(self.cond_to_beta(zeros_t))
+
+            emb = gamma * emb + beta
 
         seasonal_enc = emb.reshape(batch_size, num_features, -1, self.d_model)
         seasonal_enc = self.head(seasonal_enc)
 
-        if self.configs.use_trend_context_pretrain == 0:
-            y_enc = seasonal_enc
-        else:
-            y_enc = seasonal_enc + self.regression[0](trend.permute(0, 2, 1)).permute(0, 2, 1).contiguous()
+        y_enc = seasonal_enc + self.regression[0](trend.permute(0, 2, 1)).permute(0, 2, 1).contiguous()
 
         y_enc = y_enc * (stdevs[:, 0, :].unsqueeze(1)).repeat(1, self.pred_len, 1)
         y_enc = y_enc + (means[:, 0, :].unsqueeze(1)).repeat(1, self.pred_len, 1)
 
         return y_enc, freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss
-
     def forward(self, batch_x, x_mask, i=0):
         if self.task_name == "pretrain":
             return self.pretrain(batch_x, x_mask, i)
@@ -1152,6 +1252,7 @@ class Model(nn.Module):
             return dec_out[:, -self.pred_len:, :], freq_loss, orth_loss, smoothness, season_freq_loss, recon_loss
         else:
             raise ValueError("task_name should be 'pretrain' or 'finetune'")
+
 def get_config():
     import argparse
     import torch

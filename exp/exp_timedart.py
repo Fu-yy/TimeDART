@@ -1,5 +1,6 @@
 from data_provider.data_factory import data_provider
 from exp.exp_basic import Exp_Basic
+from models.TimeDART_paramsandtime_re_20260330103340 import FixedMultiScaleConv,FixedMultiScaleConv, LightWeightGenerator
 from utils.tools import (
     EarlyStopping,
     adjust_learning_rate,
@@ -158,6 +159,45 @@ class AdaptiveLossBalancer:
             total_loss = total_loss + loss_weight_value
             factor_hist[name].append(loss_weight_value.item())
         return total_loss, adaptive_factors,factor_hist
+
+
+
+import torch
+
+def count_fixed_multiscale_conv(m, x, y):
+    x = x[0]
+    B, C, L = x.shape
+
+    total_ops = 0
+    for conv in m.conv_layers:
+        k = conv.kernel_size[0]
+        total_ops += B * C * L * k
+
+    # 一定要跟 m.total_ops 保持同 device / dtype
+    if not hasattr(m, "total_ops"):
+        return
+
+    m.total_ops += m.total_ops.new_tensor([total_ops])
+
+
+def count_lightweight_generator(m, x, y):
+    x = x[0]
+    B, C, L = x.shape
+    K = m.num_scales
+
+    # AdaptiveAvgPool1d(1): 近似 B*C*L
+    pool_ops = B * C * L
+
+    # Linear(C -> C*K): B * C * (C*K)
+    linear_ops = B * C * (C * K)
+
+    total_ops = pool_ops + linear_ops
+
+    # 一定要跟 m.total_ops 保持同 device / dtype
+    if not hasattr(m, "total_ops"):
+        return
+
+    m.total_ops += m.total_ops.new_tensor([total_ops])
 class Exp_TimeDART(Exp_Basic):
     def __init__(self, args):
         super(Exp_TimeDART, self).__init__(args)
@@ -204,7 +244,27 @@ class Exp_TimeDART(Exp_Basic):
         self.loss_names = ['diff', 'freq', 'orth', 'smooth', 'season_freq', 'recon']
         self.project_path= os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
 
+    def _clear_thop_buffers_and_hooks(self, model):
+        for module in model.modules():
+            # 清掉 thop 常挂的统计 buffer
+            if hasattr(module, "total_ops"):
+                try:
+                    delattr(module, "total_ops")
+                except Exception:
+                    pass
+            if hasattr(module, "total_params"):
+                try:
+                    delattr(module, "total_params")
+                except Exception:
+                    pass
 
+            # 清掉 forward hooks（thop失败时可能残留）
+            if hasattr(module, "_forward_hooks"):
+                module._forward_hooks.clear()
+            if hasattr(module, "_forward_pre_hooks"):
+                module._forward_pre_hooks.clear()
+            if hasattr(module, "_backward_hooks"):
+                module._backward_hooks.clear()
     def _build_model(self):
         model = self.model_dict[self.args.model].Model(self.args).float()
 
@@ -382,7 +442,7 @@ class Exp_TimeDART(Exp_Basic):
                 diff_loss = self.model(batch_x)
                 # diff_loss.requires_grad = True
             # diff_loss = model_criterion(pred_x, batch_x)
-            elif self.args.model == 'TimeDART':
+            elif self.args.model == 'TimeDART' or self.args.model == 'TimeDART_paramsandtime_re_20260330103340':
                 # pred_x,freq_loss,orth_loss,smoothness,season_freq_loss,recon_loss = self.model(batch_x,batch_y,i)
                 # pred_x,freq_loss,orth_loss,smoothness,season_freq_loss = self.model(batch_x,batch_y,i)
                 diff_loss,freq_loss,orth_loss,smoothness,season_freq_loss,recon_loss = self.model(batch_x,batch_y,i)
@@ -479,8 +539,8 @@ class Exp_TimeDART(Exp_Basic):
         # ###############绘图
 
         # 解决中文显示问题
-        plt.rcParams['font.sans-serif'] = ['SimHei']  # 使用黑体
-        plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
+        # plt.rcParams['font.sans-serif'] = ['SimHei']  # 使用黑体
+        # plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
 
         # 下采样函数：每隔step个点取一个点
         def downsample(data, step=10):
@@ -547,7 +607,7 @@ class Exp_TimeDART(Exp_Basic):
                     # pred_x = self.model(batch_x)
                     diff_loss = self.model(batch_x)
                 # diff_loss = model_criterion(pred_x, batch_x)
-                elif self.args.model == 'TimeDART':
+                elif self.args.model == 'TimeDART' or self.args.model == 'TimeDART_paramsandtime_re_20260330103340':
                     # pred_x, freq_loss, orth_loss, smoothness,season_freq_loss,recon_loss = self.model(batch_x, batch_x_m, i)
                     # diff_loss = self.model(batch_x)
                     # diff_loss = model_criterion(pred_x, batch_x)
@@ -564,44 +624,187 @@ class Exp_TimeDART(Exp_Basic):
         vali_loss = np.mean(vali_loss)
 
         return vali_loss
-    def train_count_params(self, setting):
-        from thop import profile
-        from thop import clever_format
+    def _sync_device(self):
+        dev_str = str(self.device).lower()
+        if "cuda" in dev_str and torch.cuda.is_available():
+            torch.cuda.synchronize()
+        elif "musa" in dev_str and hasattr(torch, "musa"):
+            try:
+                torch.musa.synchronize()
+            except Exception:
+                pass
 
-        train_data, train_loader = self._get_data(flag="train")
-        model_optim = self._select_optimizer()
-        model_scheduler = lr_scheduler.OneCycleLR(
-            optimizer=model_optim,
-            steps_per_epoch=len(train_loader),
-            pct_start=self.args.pct_start,
-            epochs=self.args.train_epochs,
-            max_lr=self.args.learning_rate,
-        )
-        for epoch in range(self.args.train_epochs):
-            train_loader = tqdm(train_loader, desc="Training")
-            print("Current learning rate: {:.7f}".format(model_scheduler.get_last_lr()[0]))
-            self.model.train()
-            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(
-                train_loader
-            ):
-                model_optim.zero_grad()
+    def count_params_macs_once(
+        self,
+        model,
+        flag="test",
+        warmup_steps=10,
+        measure_steps=50,
+    ):
+        from thop import profile, clever_format
 
+        data_set, data_loader = self._get_data(flag=flag)
+        model.eval()
+
+        first_batch = next(iter(data_loader))
+        batch_x, batch_y, batch_x_mark, batch_y_mark = first_batch
+        batch_x = batch_x.float().to(self.device)
+        batch_x_mark = batch_x_mark.float().to(self.device)
+
+        # ===== Params =====
+        if hasattr(model, "count_active_parameters"):
+            params_raw = model.count_active_parameters(trainable_only=False)
+            trainable_params_raw = model.count_active_parameters(trainable_only=True)
+        else:
+            params_raw = sum(p.numel() for p in model.parameters())
+            trainable_params_raw = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+        # params_fmt = clever_format([params_raw], "%.3f")[0]
+        params_fmt = clever_format([params_raw], "%.3f")
+        if isinstance(params_fmt, (list, tuple)):
+            params_fmt = params_fmt[0]
+
+        # ===== 先 dummy forward，确保 lazy module 初始化 =====
+        with torch.no_grad():
+            _ = model(batch_x, batch_x_mark, 0)
+        self._sync_device()
+
+        # ===== MACs =====
+        macs_raw = -1
+        macs_fmt = "N/A"
+
+        # 先清一次，避免上次失败残留
+        self._clear_thop_buffers_and_hooks(model)
+
+        try:
+            with torch.no_grad():
+                macs_raw, _ = profile(
+                    model,
+                    inputs=(batch_x, batch_x_mark, 0),
+                    custom_ops={
+                        FixedMultiScaleConv: count_fixed_multiscale_conv,
+                        LightWeightGenerator: count_lightweight_generator,
+                    },
+                    verbose=False
+                )
+            macs_fmt = clever_format([macs_raw], "%.3f")
+            if isinstance(macs_fmt, (list, tuple)):
+                macs_fmt = macs_fmt[0]
+
+        except Exception as e:
+            print(f"[WARN] thop profile failed: {e}")
+
+        finally:
+            # 不管成功失败，都清残留
+            self._clear_thop_buffers_and_hooks(model)
+
+        # ===== Time =====
+        total_time = 0.0
+        total_samples = 0
+        total_steps = 0
+
+        with torch.no_grad():
+            for step, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(data_loader):
                 batch_x = batch_x.float().to(self.device)
+                batch_x_mark = batch_x_mark.float().to(self.device)
 
-                macs, params = profile(self.model, inputs=(batch_x,None,i))
-                macs, params = clever_format([macs, params], "%.3f")
+                if step < warmup_steps:
+                    _ = model(batch_x, batch_x_mark, step)
+                    self._sync_device()
+                    continue
 
-                print("models: {},datasets: {},seq_len:{},pred_len: {},macs: {}, params: {}".format(self.args.model,
-                                                                                                    self.args.data,
-                                                                                                    self.args.seq_len,
-                                                                                                    self.args.pred_len,
-                                                                                                    macs, params))
-                result_str = ("models: " + str(self.args.model) + ",datasets:" + self.args.data +
-                              ",seq_len:" + str(self.args.seq_len) + ",pred_len: " + str(
-                            self.args.pred_len) + ",macs:" + str(macs) + ", params:" + str(params))
-                break
-            break
-        return result_str
+                if total_steps >= measure_steps:
+                    break
+
+                self._sync_device()
+                start_t = time.time()
+                _ = model(batch_x, batch_x_mark, step)
+                self._sync_device()
+                end_t = time.time()
+
+                total_time += (end_t - start_t)
+                total_samples += batch_x.size(0)
+                total_steps += 1
+
+        ms_per_sample = (total_time / max(total_samples, 1)) * 1000.0
+        samples_per_sec = total_samples / max(total_time, 1e-12)
+
+        result = {
+            "ablation_mode": getattr(model, "ablation_mode", "full"),
+            "params_raw": params_raw,
+            "trainable_params_raw": trainable_params_raw,
+            "macs_raw": macs_raw,
+            "params_fmt": params_fmt,
+            "macs_fmt": macs_fmt,
+            "ms_per_sample": ms_per_sample,
+            "samples_per_sec": samples_per_sec,
+            "measured_samples": total_samples,
+            "measured_steps": total_steps,
+        }
+        return result
+
+    def profile_efficiency_variants(self, flag="test", warmup_steps=10, measure_steps=50):
+        """
+        分别统计:
+            - full
+            - no_aasd
+            - no_tcsr
+        """
+        assert hasattr(self.model, "set_ablation_mode"), \
+            "Model 里没有 set_ablation_mode，请先按我给的 model 代码修改。"
+
+        variants = [
+            ("full", "Full"),
+            ("no_aasd", "w/o AASD"),
+            ("no_tcsr", "w/o TCSR"),
+        ]
+
+        old_mode = getattr(self.model, "ablation_mode", "full")
+        all_results = []
+
+        print("\n================ Efficiency Profiling ================\n")
+        for mode, show_name in variants:
+            self.model.set_ablation_mode(mode)
+            result = self.count_params_macs_once(
+                model=self.model,
+                flag=flag,
+                warmup_steps=warmup_steps,
+                measure_steps=measure_steps,
+            )
+            all_results.append((show_name, result))
+
+            print(
+                "[{}] Params: {} ({:,}) | Trainable Params: {:,} | MACs: {} ({}) | {:.3f} ms/sample | {:.1f} samples/s".format(
+                    show_name,
+                    result["params_fmt"],
+                    result["params_raw"],
+                    result["trainable_params_raw"],
+                    result["macs_fmt"],
+                    result["macs_raw"],
+                    result["ms_per_sample"],
+                    result["samples_per_sec"],
+                )
+            )
+
+        self.model.set_ablation_mode(old_mode)
+
+        print("\n=====================================================\n")
+        return all_results
+
+    def format_efficiency_results(self, results):
+        lines = []
+        lines.append("Efficiency profiling results:")
+        for show_name, r in results:
+            line = (
+                f"{show_name}: "
+                f"Params={r['params_fmt']} "
+                f"(trainable={r['trainable_params_raw']:,}), "
+                f"MACs={r['macs_fmt']}, "
+                f"Time={r['ms_per_sample']:.3f} ms/sample, "
+                f"Throughput={r['samples_per_sec']:.1f} samples/s"
+            )
+            lines.append(line)
+        return "\n".join(lines)
 
     def train(self, setting):
         train_data, train_loader = self._get_data(flag="train")
@@ -780,8 +983,8 @@ class Exp_TimeDART(Exp_Basic):
         # ###############绘图
 
         # 解决中文显示问题
-        plt.rcParams['font.sans-serif'] = ['SimHei']  # 使用黑体
-        plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
+        # plt.rcParams['font.sans-serif'] = ['SimHei']  # 使用黑体
+        # plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
 
         # 下采样函数：每隔step个点取一个点
         def downsample(data, step=10):
@@ -975,23 +1178,42 @@ class Exp_TimeDART(Exp_Basic):
         )
         f = open(folder_path + "/score.txt", "a")
         from datetime import datetime
-        params_str = self.train_count_params(self.args)
+        efficiency_results = self.profile_efficiency_variants(
+            flag="test",
+            warmup_steps=10,
+            measure_steps=50
+        )
+        params_str = self.format_efficiency_results(efficiency_results)
         # f.write('params:{}'.format(params_str) + "  \n")
 
         # 获取当前时间
         now = datetime.now()
-
-        # 方式1：标准格式化输出（示例：2023-10-25 15:30:45）
         formatted_time = now.strftime("%Y-%m-%d %H:%M:%S")
-        # print("当前时间:", formatted_time)
+
         f.write(
-            "{0}->{1}, {2:.3f}, {3:.3f},{4},{5},{6},{7},log_var_orth={8},log_var_season_freq={9},log_var_freq={10},use_loss_compute={11},use_new_decomp={12},use_denoise={13},log_var_season_freq={14},params={15} \n".format(
-                self.args.input_len, self.args.pred_len, mse, mae,formatted_time,self.args.d_model,
-                self.args.batch_size,self.args.n_heads,self.args.log_var_orth,self.args.log_var_season_freq,
+            "{0}->{1}, {2:.3f}, {3:.3f},{4},{5},{6},{7},log_var_orth={8},log_var_season_freq={9},log_var_freq={10},use_loss_compute={11},use_new_decomp={12},use_denoise={13},use_inner_new_decomp={14}\n{15}\n".format(
+                self.args.input_len,
+                self.args.pred_len,
+                mse,
+                mae,
+                formatted_time,
+                self.args.d_model,
+                self.args.batch_size,
+                self.args.n_heads,
+                self.args.log_var_orth,
+                self.args.log_var_season_freq,
                 self.args.log_var_freq,
-                self.args.use_loss_compute,self.args.use_new_decomp,self.args.use_denoise,self.args.use_inner_new_decomp,params_str))
+                self.args.use_loss_compute,
+                self.args.use_new_decomp,
+                self.args.use_denoise,
+                self.args.use_inner_new_decomp,
+                params_str
+            )
+        )
+
+
         f.close()
-        np.save(npz_folder_path+os.sep+ 'metrics.npy', np.array([mae, mse, rmse, mape, mspe]))
-        np.save(npz_folder_path+os.sep+'pred.npy', preds)
-        np.save(npz_folder_path +os.sep+'true.npy', trues)
+        # np.save(npz_folder_path+os.sep+ 'metrics.npy', np.array([mae, mse, rmse, mape, mspe]))
+        # np.save(npz_folder_path+os.sep+'pred.npy', preds)
+        # np.save(npz_folder_path +os.sep+'true.npy', trues)
         return
